@@ -1,0 +1,27 @@
+{
+	"luci-app-homeproxy-api": {
+		"description": "Grant access to HomeProxy API configuration and service control",
+		"read": {
+			"ubus": {
+				"service": [ "list" ]
+			},
+			"uci": [ "homeproxy-api" ],
+			"file": {
+				"/etc/init.d/homeproxy-api": [ "exec", "read" ],
+				"/sbin/logread": [ "exec" ],
+				"/etc/rc.d/S99homeproxy-api": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [ "homeproxy-api" ],
+			"file": {
+				"/etc/init.d/homeproxy-api": [ "exec", "write" ],
+				"/etc/config/homeproxy-api": [ "write" ],
+				"/usr/bin/homeproxy-api": [ "write" ],
+				"/usr/share/luci/menu.d/luci-app-homeproxy-api.json": [ "write" ],
+				"/usr/share/rpcd/acl.d/luci-app-homeproxy-api.json": [ "write" ],
+				"/www/luci-static/resources/view/services/homeproxy-api.js": [ "write" ]
+			}
+		}
+	}
+}
