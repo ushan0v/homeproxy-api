@@ -197,13 +197,6 @@ return view.extend({
 		o.rmempty = true;
 		o.description = _('If set, service listens on 0.0.0.0:<port>. If empty, legacy "listen" option is used.');
 
-		o = s.option(form.Value, 'clash_api_port', _('Clash API port'));
-		o.datatype = 'port';
-		o.placeholder = '9090';
-		o.default = '9090';
-		o.rmempty = false;
-		o.description = _('HomeProxy clash_api listen port. Secret is forced to empty.');
-
 		o = s.option(form.Value, 'allow_origin', _('CORS allow-origin'));
 		o.placeholder = '*';
 		o.rmempty = false;

@@ -211,7 +211,6 @@ ensure_service_config() {
 			set homeproxy-api.main.db='/var/run/homeproxy/cache.db'
 			set homeproxy-api.main.config='/var/run/homeproxy/sing-box-c.json'
 			set homeproxy-api.main.allow_origin='*'
-			set homeproxy-api.main.clash_api_port='9090'
 		EOF
 	}
 
@@ -222,57 +221,7 @@ ensure_service_config() {
 	[ -n "$(get_uci "$UCI_CONFIG.main.db")" ] || uci -q set "$UCI_CONFIG.main.db=/var/run/homeproxy/cache.db"
 	[ -n "$(get_uci "$UCI_CONFIG.main.config")" ] || uci -q set "$UCI_CONFIG.main.config=/var/run/homeproxy/sing-box-c.json"
 	[ -n "$(get_uci "$UCI_CONFIG.main.allow_origin")" ] || uci -q set "$UCI_CONFIG.main.allow_origin=*"
-	[ -n "$(get_uci "$UCI_CONFIG.main.clash_api_port")" ] || uci -q set "$UCI_CONFIG.main.clash_api_port=9090"
 	uci -q commit "$UCI_CONFIG"
-}
-
-patch_generate_client_for_clash_api() {
-	gen_client='/etc/homeproxy/scripts/generate_client.uc'
-	[ -s "$gen_client" ] || return 0
-
-	if ! grep -q "clash_api_enabled" "$gen_client"; then
-		sed -i "/const mixed_port/i\
-const clash_api_enabled = uci.get(uciconfig, ucicontrol, 'clash_api_enabled') || '0',\
-      clash_api_listen = uci.get(uciconfig, ucicontrol, 'clash_api_listen') || '0.0.0.0:9090',\
-      clash_api_secret = uci.get(uciconfig, ucicontrol, 'clash_api_secret'),\
-      clash_api_mode = uci.get(uciconfig, ucicontrol, 'clash_api_mode') || 'Rule';\
-" "$gen_client"
-	fi
-
-	if ! grep -q "config.experimental.clash_api" "$gen_client"; then
-		sed -i "/\/\* Experimental end \*\//i\
-	if (strToBool(clash_api_enabled)) {\
-		config.experimental.clash_api = {\
-			external_controller: clash_api_listen,\
-			secret: clash_api_secret,\
-			default_mode: clash_api_mode,\
-		};\
-	}\
-" "$gen_client"
-	fi
-}
-
-enable_clash_api() {
-	port="$(uci -q get $UCI_CONFIG.main.clash_api_port || echo 9090)"
-	case "$port" in
-		''|*[!0-9]*) port='9090' ;;
-	esac
-	listen_addr="0.0.0.0:$port"
-
-	patch_generate_client_for_clash_api || true
-
-	uci -q get homeproxy.control >/dev/null 2>&1 || {
-		warn 'homeproxy.control section not found; clash_api was not changed'
-		return 0
-	}
-
-	uci -q set homeproxy.control.clash_api_enabled='1'
-	uci -q set homeproxy.control.clash_api_listen="$listen_addr"
-	uci -q set homeproxy.control.clash_api_secret=''
-	uci -q set homeproxy.control.clash_api_mode='Rule'
-	uci -q commit homeproxy
-
-	/etc/init.d/homeproxy restart >/dev/null 2>&1 || warn 'failed to restart homeproxy'
 }
 
 start_services() {
@@ -288,7 +237,6 @@ main() {
 	download_binary
 	install_luci_files
 	ensure_service_config
-	enable_clash_api
 	start_services
 	log "HomeProxy API installed successfully"
 	log "LuCI page: Services -> HomeProxy API"

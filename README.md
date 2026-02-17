@@ -1,35 +1,42 @@
 # HomeProxy API
 
-`HomeProxy API` is a lightweight OpenWrt service for fast, batch route decisions based on your **real HomeProxy/sing-box runtime config**.
+`HomeProxy API` is a lightweight OpenWrt service that provides fast HTTP API access to:
 
-It answers: for each domain, would routing go to `proxy`, `direct`, or `block`, and by which rule.
+- domain route checks (`proxy` / `direct` / `block`) using current HomeProxy + sing-box runtime
+- HomeProxy routing rules read/update via UCI
+- fast rules-only apply (hot reload) without full HomeProxy restart
+- HomeProxy service control/status
 
-## What It Does
+## Features
 
-- Runs local HTTP API on router (`/check`, `/match`, `/stats`, `/healthz`)
-- Uses current HomeProxy-generated sing-box config (`/var/run/homeproxy/sing-box-c.json` by default)
-- Supports batch checks (5-20+ domains per request)
-- Returns:
-  - class: `proxy` / `direct` / `block`
-  - outbound display name (not only system tag)
-  - matched rule index + rule name
-- Supports two runtime modes:
-  - `default`: in-memory cache (faster responses)
-  - `eco`: cold-run per request (lower RAM usage)
-- Loads only rule-sets that are actually used in active routing rules
-- Supports rule-sets from:
-  - `remote` (from HomeProxy `cache.db`)
-  - `local` (from configured file path)
-- Integrates with LuCI page (`Services -> HomeProxy API`)
-- Can force-enable sing-box `clash_api` with empty secret (tokenless) on configurable port
+- Batch route checks: `POST /check`
+- Rule-set match lookup: `GET /match`
+- Runtime stats: `GET /stats`
+- Health check: `GET /healthz`
+- Routing rules API:
+  - list rules: `GET /rules`
+  - update one rule config (UCI only, no apply): `POST /rules/update`
+  - apply rule changes via sing-box hot reload: `POST /rules/hot-reload`
+- HomeProxy service API:
+  - status: `GET /homeproxy/status`
+  - start: `POST /homeproxy/start`
+  - stop: `POST /homeproxy/stop`
+  - restart: `POST /homeproxy/restart`
+- LuCI page: `Services -> HomeProxy API`
 
-## API Endpoints
+## API
+
+All responses are JSON. CORS is controlled by `allow_origin` in service config.
+
+### `GET /healthz`
+
+```sh
+curl http://127.0.0.1:7878/healthz
+```
 
 ### `POST /check`
 
-Batch route resolution (recommended).
-
-Request:
+Batch route decision for domains.
 
 ```json
 {
@@ -40,61 +47,120 @@ Request:
 }
 ```
 
-Response shape:
+Response contains per-domain:
 
-```json
-{
-  "mode": "default",
-  "results": [
-    {
-      "input": "google.com",
-      "normalized": "google.com",
-      "inputType": "domain",
-      "class": "direct",
-      "outbound": "direct",
-      "outboundTag": "direct",
-      "matched": true,
-      "ruleIndex": 4,
-      "ruleName": "my-direct-rule",
-      "actionType": "route"
-    }
-  ]
-}
-```
+- `class`: `proxy` / `direct` / `block`
+- `outbound`: outbound display name
+- `outboundTag`: sing-box outbound tag
+- matched rule metadata (`ruleIndex`, `ruleName`, `actionType`, `ruleExpr`)
 
-### `GET /check`
+### `GET /match?q=...`
 
-Simple query mode:
+Rule-set match inspection:
 
 ```sh
-curl "http://192.168.1.1:7878/check?q=google.com,youtube.com"
-```
-
-### `GET /match`
-
-Shows which rule-set tags contain a domain/IP:
-
-```sh
-curl "http://192.168.1.1:7878/match?q=google.com"
+curl "http://127.0.0.1:7878/match?q=google.com"
 ```
 
 ### `GET /stats`
 
-Service/runtime stats:
+Runtime internals:
 
 ```sh
-curl "http://192.168.1.1:7878/stats"
+curl "http://127.0.0.1:7878/stats"
 ```
 
-### `GET /healthz`
+### `GET /rules`
 
-Health check:
+Returns all HomeProxy `routing_rule` sections with:
+
+- internal id: section name (`id`)
+- generated rule tag (`tag` => `cfg-<id>-rule`)
+- rule name (`label` fallback to section id)
+- selected rule-sets (with id/tag/name)
+- Host/IP fields:
+  - `domain`
+  - `domainSuffix`
+  - `domainKeyword`
+  - `domainRegex`
+  - `ipCidr`
+  - `sourceIpCidr`
+- Port fields:
+  - `sourcePort`
+  - `sourcePortRange`
+  - `port`
+  - `portRange`
+- outbound/action summary:
+  - `action`
+  - `class` (`proxy/direct/block/...`)
+  - outbound `tag`, `name`, `uciTag` when available
 
 ```sh
-curl "http://192.168.1.1:7878/healthz"
+curl http://127.0.0.1:7878/rules
 ```
 
-## LuCI UI
+### `POST /rules/update`
+
+Updates only configurable arrays of one routing rule, commits to UCI, but does **not** apply runtime changes.
+
+Request:
+
+```json
+{
+  "tag": "cfg-abc123-rule",
+  "config": {
+    "ruleSet": ["my_ruleset_1", "my_ruleset_2"],
+    "domain": ["example.com"],
+    "domainSuffix": ["google.com"],
+    "domainKeyword": ["cdn"],
+    "domainRegex": ["^api\\..*"],
+    "ipCidr": ["1.1.1.0/24"],
+    "sourceIpCidr": ["192.168.1.0/24"],
+    "sourcePort": ["443"],
+    "sourcePortRange": ["10000:20000"],
+    "port": ["80", "443"],
+    "portRange": ["8080:8090"]
+  }
+}
+```
+
+Notes:
+
+- `tag` may be either generated rule tag (`cfg-...-rule`) or raw section id.
+- snake_case aliases are also accepted (for example `rule_set`, `source_ip_cidr`, `port_range`).
+- only listed arrays are replaced.
+
+### `POST /rules/hot-reload`
+
+Fast apply path for routing changes:
+
+1. regenerate HomeProxy client config (`generate_client.uc`)
+2. validate config (`sing-box check --config /var/run/homeproxy/sing-box-c.json`)
+3. send `SIGHUP` to running HomeProxy sing-box client process
+
+```sh
+curl -X POST http://127.0.0.1:7878/rules/hot-reload
+```
+
+This avoids full HomeProxy service restart and avoids firewall/network reinit done by `/etc/init.d/homeproxy reload`.
+
+### HomeProxy service control API
+
+Status:
+
+```sh
+curl http://127.0.0.1:7878/homeproxy/status
+```
+
+Start / Stop / Restart:
+
+```sh
+curl -X POST http://127.0.0.1:7878/homeproxy/start
+curl -X POST http://127.0.0.1:7878/homeproxy/stop
+curl -X POST http://127.0.0.1:7878/homeproxy/restart
+```
+
+## LuCI
 
 Menu: `Services -> HomeProxy API`
 
@@ -103,59 +169,42 @@ Settings:
 - `Enable service`
 - `Enable autostart`
 - `Working mode` (`default` / `eco`)
-- `HomeProxy API port` (default `7878`)
-- `Clash API port` (default `9090`)
+- `HomeProxy API port`
 - `CORS allow-origin`
 
 Tools:
 
 - `Logs`
-- `Uninstall` (removes service + LuCI files)
+- `Uninstall` (removes HomeProxy API service + LuCI files)
 
 ## Installation (OpenWrt)
-
-### Quick install from GitHub
 
 ```sh
 wget -O - https://raw.githubusercontent.com/ushan0v/homeproxy-api/main/install.sh | sh
 ```
 
-Or:
+or
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ushan0v/homeproxy-api/main/install.sh | sh
 ```
 
-### Installer behavior
+Installer behavior:
 
-`install.sh`:
+- checks dependencies (`homeproxy`, `sing-box`)
+- detects architecture and installs matching prebuilt binary from `dist/`
+- installs init/UCI/LuCI files
+- enables + starts `homeproxy-api`
+- enables autostart
 
-- detects device architecture
-- picks matching prebuilt binary from `dist/`
-- checks dependencies:
-  - HomeProxy installed (`/etc/init.d/homeproxy`)
-  - sing-box installed (`/usr/bin/sing-box` or in `PATH`)
-- installs service + LuCI files
-- enables service + autostart
-- enables `clash_api` with:
-  - `external_controller=0.0.0.0:<clash_api_port>`
-  - empty secret
-  - mode `Rule`
-
-Environment overrides (optional):
+Optional environment overrides:
 
 - `HPA_REPO_OWNER`
 - `HPA_REPO_NAME`
 - `HPA_REPO_REF`
 - `HPA_BASE_URL`
 
-Example:
-
-```sh
-HPA_REPO_OWNER=myfork HPA_REPO_NAME=homeproxy-api HPA_REPO_REF=dev sh install.sh
-```
-
-## Cross-Compilation
+## Cross Compilation
 
 Build all common Linux targets:
 
@@ -163,9 +212,7 @@ Build all common Linux targets:
 ./scripts/build-release.sh
 ```
 
-Builds are saved to `dist/`.
-
-Included targets:
+Targets:
 
 - `amd64`
 - `386`
@@ -181,31 +228,22 @@ Included targets:
 - `mips64le`
 - `riscv64`
 
-## Security Notes
+## Local Development
 
-- If API is reachable outside LAN, set restrictive firewall rules.
-- `clash_api` is configured without token by design for local tooling speed.
-- Keep router management UI/API on trusted networks only.
-
-## Service Files (on router)
-
-- Binary: `/usr/bin/homeproxy-api`
-- Init: `/etc/init.d/homeproxy-api`
-- Config: `/etc/config/homeproxy-api`
-- LuCI view: `/www/luci-static/resources/view/services/homeproxy-api.js`
-- Menu: `/usr/share/luci/menu.d/luci-app-homeproxy-api.json`
-- ACL: `/usr/share/rpcd/acl.d/luci-app-homeproxy-api.json`
-
-## Development
-
-Build local binary:
+Build:
 
 ```sh
 go build -o homeproxy-api .
 ```
 
-Run directly:
+Run:
 
 ```sh
 ./homeproxy-api -listen 0.0.0.0:7878 -config /var/run/homeproxy/sing-box-c.json -db /var/run/homeproxy/cache.db -mode default
 ```
+
+## Security Notes
+
+- API can control routing rules and HomeProxy service; restrict access to trusted LAN only.
+- If you expose the API beyond LAN, enforce firewall ACL and reverse-proxy auth.
+- Keep LuCI/rpcd protected with strong credentials.

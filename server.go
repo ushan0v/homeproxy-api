@@ -1439,6 +1439,13 @@ func (s *matchService) serve(listen string) error {
 	mux.HandleFunc("/match", s.handleMatch)
 	mux.HandleFunc("/check", s.handleCheck)
 	mux.HandleFunc("/stats", s.handleStats)
+	mux.HandleFunc("/rules", s.handleRulesList)
+	mux.HandleFunc("/rules/update", s.handleRulesUpdate)
+	mux.HandleFunc("/rules/hot-reload", s.handleRulesHotReload)
+	mux.HandleFunc("/homeproxy/status", s.handleHomeproxyStatus)
+	mux.HandleFunc("/homeproxy/start", s.handleHomeproxyStart)
+	mux.HandleFunc("/homeproxy/stop", s.handleHomeproxyStop)
+	mux.HandleFunc("/homeproxy/restart", s.handleHomeproxyRestart)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		s.writeCORS(w)
 		if r.Method == http.MethodOptions {

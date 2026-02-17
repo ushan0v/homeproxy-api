@@ -29,7 +29,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  - Reads sing-box remote rule-sets directly from homeproxy cache.db (bbolt), no temp .srs files.")
 	fmt.Fprintln(os.Stderr, "  - Prints which cached rule-sets match the input domain/IP.")
 	fmt.Fprintln(os.Stderr, "  - Server mode defaults to in-memory cache; use -mode eco (or -eco) for cold-run per request.")
-	fmt.Fprintln(os.Stderr, "  - HTTP endpoints: GET /match, POST /check, GET /stats, GET /healthz.")
+	fmt.Fprintln(os.Stderr, "  - HTTP endpoints: /check, /match, /stats, /rules, /rules/update, /rules/hot-reload, /homeproxy/*, /healthz.")
 }
 
 func shortTag(tag string) string {
