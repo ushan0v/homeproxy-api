@@ -6,11 +6,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -116,7 +113,8 @@ type rulesHotReloadResponse struct {
 	Checked    bool      `json:"checked"`
 	Signaled   bool      `json:"signaled"`
 	Signal     string    `json:"signal"`
-	PIDs       []int     `json:"pids"`
+	Service    string    `json:"service"`
+	Instance   string    `json:"instance"`
 	Config     string    `json:"config"`
 	ReloadedAt time.Time `json:"reloadedAt"`
 }
@@ -583,57 +581,6 @@ func (s *matchService) handleRulesUpdate(w http.ResponseWriter, r *http.Request)
 	_ = enc.Encode(resp)
 }
 
-func findHomeproxyClientPIDs() ([]int, error) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil, err
-	}
-	pids := make([]int, 0)
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if name == "" {
-			continue
-		}
-		pid, err := strconv.Atoi(name)
-		if err != nil || pid <= 0 {
-			continue
-		}
-		cmdlineRaw, err := os.ReadFile("/proc/" + name + "/cmdline")
-		if err != nil || len(cmdlineRaw) == 0 {
-			continue
-		}
-		rawArgs := strings.Split(string(cmdlineRaw), "\x00")
-		args := make([]string, 0, len(rawArgs))
-		for _, arg := range rawArgs {
-			if arg == "" {
-				continue
-			}
-			args = append(args, arg)
-		}
-		if len(args) == 0 {
-			continue
-		}
-		if filepath.Base(args[0]) != "sing-box" {
-			continue
-		}
-		hasClientConfig := false
-		for _, arg := range args {
-			if arg == homeproxyClientConfigPath {
-				hasClientConfig = true
-				break
-			}
-		}
-		if hasClientConfig {
-			pids = append(pids, pid)
-		}
-	}
-	sort.Ints(pids)
-	return pids, nil
-}
-
 func detectSingBoxBinary() string {
 	if _, err := os.Stat("/usr/bin/sing-box"); err == nil {
 		return "/usr/bin/sing-box"
@@ -661,20 +608,9 @@ func (s *matchService) handleRulesHotReload(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "sing-box check failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	pids, err := findHomeproxyClientPIDs()
-	if err != nil {
-		http.Error(w, "find sing-box process failed: "+err.Error(), http.StatusInternalServerError)
+	if _, err := runCommandCombined("ubus", "call", "service", "signal", `{"name":"homeproxy","instance":"sing-box-c","signal":1}`); err != nil {
+		http.Error(w, "ubus signal failed: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if len(pids) == 0 {
-		http.Error(w, "homeproxy sing-box client process not found", http.StatusNotFound)
-		return
-	}
-	for _, pid := range pids {
-		if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
-			http.Error(w, fmt.Sprintf("failed to signal pid %d: %v", pid, err), http.StatusInternalServerError)
-			return
-		}
 	}
 
 	resp := rulesHotReloadResponse{
@@ -682,7 +618,8 @@ func (s *matchService) handleRulesHotReload(w http.ResponseWriter, r *http.Reque
 		Checked:    true,
 		Signaled:   true,
 		Signal:     "SIGHUP",
-		PIDs:       pids,
+		Service:    "homeproxy",
+		Instance:   "sing-box-c",
 		Config:     homeproxyClientConfigPath,
 		ReloadedAt: time.Now(),
 	}

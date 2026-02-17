@@ -136,7 +136,7 @@ Fast apply path for routing changes:
 
 1. regenerate HomeProxy client config (`generate_client.uc`)
 2. validate config (`sing-box check --config /var/run/homeproxy/sing-box-c.json`)
-3. send `SIGHUP` to running HomeProxy sing-box client process
+3. call `ubus service signal` for HomeProxy client instance (`homeproxy/sing-box-c`, `SIGHUP`)
 
 ```sh
 curl -X POST http://127.0.0.1:7878/rules/hot-reload
