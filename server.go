@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,7 +88,7 @@ type matchState struct {
 type matchService struct {
 	dbPath      string
 	configPath  string
-	allowOrigin string
+	accessToken string
 	mode        string
 	ecoMode     bool
 
@@ -1238,20 +1239,60 @@ func (s *matchService) evaluateOne(state *matchState, input string, inbound stri
 	return res
 }
 
-func (s *matchService) writeCORS(w http.ResponseWriter) {
-	allowOrigin := s.allowOrigin
-	if allowOrigin == "" {
-		allowOrigin = "*"
+func parseBearerToken(authHeader string) string {
+	authHeader = strings.TrimSpace(authHeader)
+	if authHeader == "" {
+		return ""
 	}
-	w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	parts := strings.Fields(authHeader)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+		return strings.TrimSpace(parts[1])
+	}
+	return authHeader
+}
+
+func (s *matchService) authorized(r *http.Request) bool {
+	expected := strings.TrimSpace(s.accessToken)
+	if expected == "" {
+		return true
+	}
+
+	candidates := []string{
+		strings.TrimSpace(r.URL.Query().Get("access_token")),
+		strings.TrimSpace(r.URL.Query().Get("token")),
+		strings.TrimSpace(r.Header.Get("X-Access-Token")),
+		parseBearerToken(r.Header.Get("Authorization")),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(candidate), []byte(expected)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *matchService) requireAuth(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return false
+	}
+	if s.authorized(r) {
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":   "unauthorized",
+		"message": "missing or invalid access token",
+	})
+	return false
 }
 
 func (s *matchService) handleMatch(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	q := r.URL.Query().Get("q")
@@ -1309,9 +1350,7 @@ func (s *matchService) handleMatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *matchService) handleCheck(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	state, done, err := s.getStateForRequest()
@@ -1379,9 +1418,7 @@ func (s *matchService) handleCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *matchService) handleStats(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	state, done, err := s.getStateForRequest()
@@ -1447,9 +1484,7 @@ func (s *matchService) serve(listen string) error {
 	mux.HandleFunc("/homeproxy/stop", s.handleHomeproxyStop)
 	mux.HandleFunc("/homeproxy/restart", s.handleHomeproxyRestart)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		s.writeCORS(w)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		if !s.requireAuth(w, r) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)

@@ -64,6 +64,27 @@ function safeExec(path, args) {
 	return L.resolveDefault(fs.exec(path, args), null);
 }
 
+function generateTokenHex(byteLen) {
+	var bytes = [];
+	var i, out = '';
+	byteLen = byteLen || 24;
+
+	if (window.crypto && window.crypto.getRandomValues) {
+		var arr = new Uint8Array(byteLen);
+		window.crypto.getRandomValues(arr);
+		for (i = 0; i < arr.length; i++)
+			bytes.push(arr[i]);
+	} else {
+		for (i = 0; i < byteLen; i++)
+			bytes.push(Math.floor(Math.random() * 256));
+	}
+
+	for (i = 0; i < bytes.length; i++)
+		out += ('0' + bytes[i].toString(16)).slice(-2);
+
+	return out;
+}
+
 function removeFilesSequentially(paths) {
 	var p = Promise.resolve();
 	paths.forEach(function(path) {
@@ -99,6 +120,19 @@ return view.extend({
 					ui.changes.apply(mode === '0');
 				});
 		});
+	},
+
+	handleGenerateToken: function() {
+		var input = document.getElementById('cbid.homeproxy-api.main.access_token');
+		if (!input) {
+			ui.addNotification(null, E('p', {}, _('Token field not found.')));
+			return;
+		}
+		input.value = generateTokenHex(24);
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		input.dispatchEvent(new Event('change', { bubbles: true }));
+		input.focus();
+		ui.addNotification(null, E('p', {}, _('Access token generated. Click Save & Apply.')), 'info');
 	},
 
 	handleShowLogs: function() {
@@ -197,10 +231,17 @@ return view.extend({
 		o.rmempty = true;
 		o.description = _('If set, service listens on 0.0.0.0:<port>. If empty, legacy "listen" option is used.');
 
-		o = s.option(form.Value, 'allow_origin', _('CORS allow-origin'));
-		o.placeholder = '*';
-		o.rmempty = false;
-		o.default = '*';
+		o = s.option(form.Value, 'access_token', _('Access token'));
+		o.placeholder = _('token is not used');
+		o.rmempty = true;
+		o.default = '';
+		o.description = _('Leave empty to disable token auth for API requests.');
+
+		o = s.option(form.Button, '_generate_token', _('Generate token'));
+		o.inputtitle = _('Generate token');
+		o.inputstyle = 'action';
+		o.onclick = ui.createHandlerFn(this, 'handleGenerateToken');
+		o.description = _('Generates a random token and fills the field above.');
 
 		s = m.section(form.NamedSection, 'main', 'main', _('Tools'));
 		s.anonymous = true;

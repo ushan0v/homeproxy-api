@@ -22,8 +22,8 @@ var benchSink int
 func usage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  homeproxy-api [-db /var/run/homeproxy/cache.db] [-bench N] <domain-or-ip>")
-	fmt.Fprintln(os.Stderr, "  homeproxy-api -listen 127.0.0.1:7860 [-db /var/run/homeproxy/cache.db] [-config /var/run/homeproxy/sing-box-c.json] [-allow-origin '*'] [-mode default|eco]")
-	fmt.Fprintln(os.Stderr, "  homeproxy-api -port 7860 [-db /var/run/homeproxy/cache.db] [-config /var/run/homeproxy/sing-box-c.json] [-allow-origin '*'] [-mode default|eco]")
+	fmt.Fprintln(os.Stderr, "  homeproxy-api -listen 127.0.0.1:7860 [-db /var/run/homeproxy/cache.db] [-config /var/run/homeproxy/sing-box-c.json] [-access-token 'token'] [-mode default|eco]")
+	fmt.Fprintln(os.Stderr, "  homeproxy-api -port 7860 [-db /var/run/homeproxy/cache.db] [-config /var/run/homeproxy/sing-box-c.json] [-access-token 'token'] [-mode default|eco]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Notes:")
 	fmt.Fprintln(os.Stderr, "  - Reads sing-box remote rule-sets directly from homeproxy cache.db (bbolt), no temp .srs files.")
@@ -109,7 +109,7 @@ func main() {
 		listen      string
 		port        int
 		configPath  string
-		allowOrigin string
+		accessToken string
 		mode        string
 		eco         bool
 	)
@@ -118,7 +118,7 @@ func main() {
 	flag.StringVar(&listen, "listen", "", "run as HTTP server on this address, e.g. 127.0.0.1:7860")
 	flag.IntVar(&port, "port", 0, "run as HTTP server on 0.0.0.0:<port> (shortcut for -listen)")
 	flag.StringVar(&configPath, "config", "", "optional path to sing-box config json (for tags/urls mapping)")
-	flag.StringVar(&allowOrigin, "allow-origin", "*", "CORS Access-Control-Allow-Origin value for HTTP mode")
+	flag.StringVar(&accessToken, "access-token", "", "optional HTTP API access token (empty = token auth disabled)")
 	flag.StringVar(&mode, "mode", "default", "server mode: default (cached) or eco (cold-run per request)")
 	flag.BoolVar(&eco, "eco", false, "alias of -mode eco")
 	flag.Usage = usage
@@ -146,7 +146,7 @@ func main() {
 		svc := &matchService{
 			dbPath:      dbPath,
 			configPath:  configPath,
-			allowOrigin: allowOrigin,
+			accessToken: strings.TrimSpace(accessToken),
 			mode:        mode,
 			ecoMode:     mode == "eco",
 		}

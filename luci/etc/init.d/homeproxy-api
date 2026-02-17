@@ -27,7 +27,7 @@ start_service() {
 	config_get mode main mode 'default'
 	config_get db main db '/var/run/homeproxy/cache.db'
 	config_get cfg main config '/var/run/homeproxy/sing-box-c.json'
-	config_get origin main allow_origin '*'
+	config_get access_token main access_token ''
 
 	sync_autostart
 
@@ -48,7 +48,8 @@ start_service() {
 	else
 		procd_append_param command -listen "$listen"
 	fi
-	procd_append_param command -mode "$mode" -db "$db" -config "$cfg" -allow-origin "$origin"
+	procd_append_param command -mode "$mode" -db "$db" -config "$cfg"
+	[ -n "$access_token" ] && procd_append_param command -access-token "$access_token"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

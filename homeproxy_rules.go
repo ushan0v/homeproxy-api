@@ -445,9 +445,7 @@ func listOutboundLabels(sections []uciSection) map[string]string {
 }
 
 func (s *matchService) handleRulesList(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -531,9 +529,7 @@ func (s *matchService) handleRulesList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *matchService) handleRulesUpdate(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -589,9 +585,7 @@ func detectSingBoxBinary() string {
 }
 
 func (s *matchService) handleRulesHotReload(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -704,9 +698,7 @@ func runHomeproxyAction(action string) error {
 }
 
 func (s *matchService) handleHomeproxyStatus(w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -730,9 +722,7 @@ func (s *matchService) handleHomeproxyStatus(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *matchService) handleHomeproxyAction(action string, w http.ResponseWriter, r *http.Request) {
-	s.writeCORS(w)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+	if !s.requireAuth(w, r) {
 		return
 	}
 	if r.Method != http.MethodPost {

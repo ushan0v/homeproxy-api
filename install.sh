@@ -210,7 +210,7 @@ ensure_service_config() {
 			set homeproxy-api.main.mode='default'
 			set homeproxy-api.main.db='/var/run/homeproxy/cache.db'
 			set homeproxy-api.main.config='/var/run/homeproxy/sing-box-c.json'
-			set homeproxy-api.main.allow_origin='*'
+			set homeproxy-api.main.access_token=''
 		EOF
 	}
 
@@ -220,7 +220,8 @@ ensure_service_config() {
 	[ -n "$(get_uci "$UCI_CONFIG.main.mode")" ] || uci -q set "$UCI_CONFIG.main.mode=default"
 	[ -n "$(get_uci "$UCI_CONFIG.main.db")" ] || uci -q set "$UCI_CONFIG.main.db=/var/run/homeproxy/cache.db"
 	[ -n "$(get_uci "$UCI_CONFIG.main.config")" ] || uci -q set "$UCI_CONFIG.main.config=/var/run/homeproxy/sing-box-c.json"
-	[ -n "$(get_uci "$UCI_CONFIG.main.allow_origin")" ] || uci -q set "$UCI_CONFIG.main.allow_origin=*"
+	[ -n "$(get_uci "$UCI_CONFIG.main.access_token")" ] || uci -q set "$UCI_CONFIG.main.access_token="
+	uci -q delete "$UCI_CONFIG.main.allow_origin" >/dev/null 2>&1 || true
 	uci -q commit "$UCI_CONFIG"
 }
 

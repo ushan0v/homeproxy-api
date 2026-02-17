@@ -26,7 +26,15 @@
 
 ## API
 
-All responses are JSON. CORS is controlled by `allow_origin` in service config.
+All responses are JSON.
+
+Optional auth:
+
+- by default token auth is disabled (empty token in config)
+- if token is set, every endpoint requires a valid token in one of:
+  - `Authorization: Bearer <token>`
+  - `X-Access-Token: <token>`
+  - query param `access_token=<token>` (or `token=<token>`)
 
 ### `GET /healthz`
 
@@ -170,7 +178,8 @@ Settings:
 - `Enable autostart`
 - `Working mode` (`default` / `eco`)
 - `HomeProxy API port`
-- `CORS allow-origin`
+- `Access token` (optional)
+- `Generate token` button (fills token field automatically)
 
 Tools:
 
@@ -239,11 +248,12 @@ go build -o homeproxy-api .
 Run:
 
 ```sh
-./homeproxy-api -listen 0.0.0.0:7878 -config /var/run/homeproxy/sing-box-c.json -db /var/run/homeproxy/cache.db -mode default
+./homeproxy-api -listen 0.0.0.0:7878 -config /var/run/homeproxy/sing-box-c.json -db /var/run/homeproxy/cache.db -mode default -access-token "your-token"
 ```
 
 ## Security Notes
 
 - API can control routing rules and HomeProxy service; restrict access to trusted LAN only.
+- Configure `Access token` if API is reachable by untrusted clients.
 - If you expose the API beyond LAN, enforce firewall ACL and reverse-proxy auth.
 - Keep LuCI/rpcd protected with strong credentials.
