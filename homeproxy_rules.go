@@ -629,6 +629,20 @@ func (s *matchService) handleRulesHotReload(w http.ResponseWriter, r *http.Reque
 	_ = enc.Encode(resp)
 }
 
+func interpretHomeproxyStatus(text string) (bool, bool) {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || lower == "unknown" {
+		return false, false
+	}
+	if strings.Contains(lower, "not running") || strings.Contains(lower, "inactive") || strings.Contains(lower, "stopped") {
+		return false, true
+	}
+	if strings.Contains(lower, "running") {
+		return true, true
+	}
+	return false, false
+}
+
 func queryHomeproxyStatus() (bool, string, error) {
 	cmd := exec.Command("/etc/init.d/homeproxy", "status")
 	out, err := cmd.CombinedOutput()
@@ -636,15 +650,15 @@ func queryHomeproxyStatus() (bool, string, error) {
 	if text == "" {
 		text = "unknown"
 	}
+	running, known := interpretHomeproxyStatus(text)
 	if err == nil {
-		if strings.Contains(strings.ToLower(text), "not running") {
-			return false, text, nil
+		if known {
+			return running, text, nil
 		}
-		return true, text, nil
-	}
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "not running") {
 		return false, text, nil
+	}
+	if known {
+		return running, text, nil
 	}
 	return false, text, err
 }
@@ -655,8 +669,38 @@ func runHomeproxyAction(action string) error {
 	default:
 		return fmt.Errorf("unsupported action: %s", action)
 	}
-	_, err := runCommandCombined("/etc/init.d/homeproxy", action)
-	return err
+
+	cmd := exec.Command("/etc/init.d/homeproxy", action)
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	lower := strings.ToLower(text)
+
+	if err == nil {
+		return nil
+	}
+
+	if action == "stop" {
+		if strings.Contains(lower, "not running") || strings.Contains(lower, "inactive") || strings.Contains(lower, "not found") {
+			return nil
+		}
+	}
+	if action == "start" {
+		if strings.Contains(lower, "already running") {
+			return nil
+		}
+	}
+	if action == "restart" {
+		if strings.Contains(lower, "not running") || strings.Contains(lower, "inactive") || strings.Contains(lower, "not found") {
+			if _, startErr := runCommandCombined("/etc/init.d/homeproxy", "start"); startErr == nil {
+				return nil
+			}
+		}
+	}
+
+	if text == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, text)
 }
 
 func (s *matchService) handleHomeproxyStatus(w http.ResponseWriter, r *http.Request) {
