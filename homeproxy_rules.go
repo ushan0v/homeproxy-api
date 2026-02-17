@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -604,8 +605,28 @@ func findHomeproxyClientPIDs() ([]int, error) {
 		if err != nil || len(cmdlineRaw) == 0 {
 			continue
 		}
-		cmdline := strings.ReplaceAll(string(cmdlineRaw), "\x00", " ")
-		if strings.Contains(cmdline, "sing-box") && strings.Contains(cmdline, homeproxyClientConfigPath) {
+		rawArgs := strings.Split(string(cmdlineRaw), "\x00")
+		args := make([]string, 0, len(rawArgs))
+		for _, arg := range rawArgs {
+			if arg == "" {
+				continue
+			}
+			args = append(args, arg)
+		}
+		if len(args) == 0 {
+			continue
+		}
+		if filepath.Base(args[0]) != "sing-box" {
+			continue
+		}
+		hasClientConfig := false
+		for _, arg := range args {
+			if arg == homeproxyClientConfigPath {
+				hasClientConfig = true
+				break
+			}
+		}
+		if hasClientConfig {
 			pids = append(pids, pid)
 		}
 	}
