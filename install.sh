@@ -91,6 +91,40 @@ detect_targets() {
 	machine="$(uname -m 2>/dev/null || echo unknown)"
 	opkg_arch="$(opkg print-architecture 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"
 
+	# OpenWrt package arch is the most reliable source (especially for mips/mipsel).
+	if echo "$opkg_arch" | grep -Eq 'mipsel|mipsle'; then
+		echo "mipsle-softfloat mipsle-hardfloat mips-softfloat mips-hardfloat"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'mips_'; then
+		echo "mips-softfloat mips-hardfloat mipsle-softfloat mipsle-hardfloat"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'aarch64|arm64'; then
+		echo "arm64"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'arm_cortex-a|armv7|armhf'; then
+		echo "armv7 armv6 armv5"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'arm_arm|armv6'; then
+		echo "armv6 armv5"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'x86_64'; then
+		echo "amd64"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'i386|i686|x86'; then
+		echo "386"
+		return 0
+	fi
+	if echo "$opkg_arch" | grep -Eq 'riscv64'; then
+		echo "riscv64"
+		return 0
+	fi
+
 	case "$machine" in
 		x86_64|amd64) echo "amd64" ;;
 		i386|i486|i586|i686|x86) echo "386" ;;
@@ -98,33 +132,24 @@ detect_targets() {
 		armv7*|armhf) echo "armv7 armv6 armv5" ;;
 		armv6*) echo "armv6 armv5" ;;
 		armv5*|arm) echo "armv5" ;;
-		mipsel|mipsle) echo "mipsle-softfloat mipsle-hardfloat" ;;
-		mips) echo "mips-softfloat mips-hardfloat" ;;
+		mipsel|mipsle) echo "mipsle-softfloat mipsle-hardfloat mips-softfloat mips-hardfloat" ;;
+		mips) echo "mips-softfloat mips-hardfloat mipsle-softfloat mipsle-hardfloat" ;;
 		mips64el|mips64le) echo "mips64le" ;;
 		mips64) echo "mips64" ;;
 		riscv64) echo "riscv64" ;;
 		*)
-			if echo "$opkg_arch" | grep -Eq 'aarch64|arm64'; then
-				echo "arm64"
-			elif echo "$opkg_arch" | grep -Eq 'arm_cortex-a|armv7|armhf'; then
-				echo "armv7 armv6 armv5"
-			elif echo "$opkg_arch" | grep -Eq 'arm_arm|armv6'; then
-				echo "armv6 armv5"
-			elif echo "$opkg_arch" | grep -Eq 'mipsel|mipsle'; then
-				echo "mipsle-softfloat mipsle-hardfloat"
-			elif echo "$opkg_arch" | grep -Eq 'mips_'; then
-				echo "mips-softfloat mips-hardfloat"
-			elif echo "$opkg_arch" | grep -Eq 'x86_64'; then
-				echo "amd64"
-			elif echo "$opkg_arch" | grep -Eq 'i386|i686|x86'; then
-				echo "386"
-			elif echo "$opkg_arch" | grep -Eq 'riscv64'; then
-				echo "riscv64"
-			else
-				echo "amd64 arm64 armv7 mipsle-softfloat mips-softfloat"
-			fi
+			echo "amd64 arm64 armv7 mipsle-softfloat mips-softfloat"
 		;;
 	esac
+}
+
+binary_compatible() {
+	bin="$1"
+	# Run help command and detect exec-format style failures.
+	# Go flag parser may return non-zero; that's fine as long as binary is executable.
+	out="$("$bin" -h 2>&1 || true)"
+	echo "$out" | grep -Eq 'exec format error|syntax error|not found' && return 1
+	return 0
 }
 
 download_binary() {
@@ -136,6 +161,10 @@ download_binary() {
 		rel="dist/${APP_NAME}-linux-${target}"
 		if copy_or_fetch "$rel" "$tmp_bin" 2>/dev/null; then
 			chmod 0755 "$tmp_bin"
+			if ! binary_compatible "$tmp_bin"; then
+				warn "binary ${target} is not compatible on this device, trying next"
+				continue
+			fi
 			put_file "$tmp_bin" "/usr/bin/$APP_NAME" 0755
 			log "installed binary: /usr/bin/$APP_NAME (${target})"
 			return 0
