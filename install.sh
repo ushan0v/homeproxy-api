@@ -41,6 +41,19 @@ have_cmd() {
 	command -v "$1" >/dev/null 2>&1
 }
 
+put_file() {
+	src="$1"
+	dst="$2"
+	mode="$3"
+	mkdir -p "$(dirname "$dst")"
+	if have_cmd install; then
+		install -m "$mode" "$src" "$dst"
+	else
+		cp "$src" "$dst"
+		chmod "$mode" "$dst"
+	fi
+}
+
 fetch_url() {
 	url="$1"
 	out="$2"
@@ -123,7 +136,7 @@ download_binary() {
 		rel="dist/${APP_NAME}-linux-${target}"
 		if copy_or_fetch "$rel" "$tmp_bin" 2>/dev/null; then
 			chmod 0755 "$tmp_bin"
-			install -m 0755 "$tmp_bin" "/usr/bin/$APP_NAME"
+			put_file "$tmp_bin" "/usr/bin/$APP_NAME" 0755
 			log "installed binary: /usr/bin/$APP_NAME (${target})"
 			return 0
 		fi
@@ -137,8 +150,7 @@ install_file() {
 	mode="$3"
 	tmp_file="$TMP_DIR/$(basename "$rel")"
 	copy_or_fetch "$rel" "$tmp_file"
-	mkdir -p "$(dirname "$dst")"
-	install -m "$mode" "$tmp_file" "$dst"
+	put_file "$tmp_file" "$dst" "$mode"
 }
 
 install_luci_files() {
