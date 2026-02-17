@@ -122,19 +122,6 @@ return view.extend({
 		});
 	},
 
-	handleGenerateToken: function() {
-		var input = document.getElementById('cbid.homeproxy-api.main.access_token');
-		if (!input) {
-			ui.addNotification(null, E('p', {}, _('Token field not found.')));
-			return;
-		}
-		input.value = generateTokenHex(24);
-		input.dispatchEvent(new Event('input', { bubbles: true }));
-		input.dispatchEvent(new Event('change', { bubbles: true }));
-		input.focus();
-		ui.addNotification(null, E('p', {}, _('Access token generated. Click Save & Apply.')), 'info');
-	},
-
 	handleShowLogs: function() {
 		return fs.exec(LOGREAD_BIN, ['-l', '200', '-e', SERVICE_NAME]).then(function(res) {
 			var out = (res && res.stdout) ? res.stdout.trim() : '';
@@ -236,12 +223,37 @@ return view.extend({
 		o.rmempty = true;
 		o.default = '';
 		o.description = _('Leave empty to disable token auth for API requests.');
+		o.renderWidget = function(section_id, option_index, cfgvalue) {
+			var node = form.Value.prototype.renderWidget.apply(this, arguments);
+			var group = node.querySelector('.control-group') || node;
+			var input = node.querySelector('input');
+			var button;
 
-		o = s.option(form.Button, '_generate_token', _('Generate token'));
-		o.inputtitle = _('Generate token');
-		o.inputstyle = 'action';
-		o.onclick = ui.createHandlerFn(this, 'handleGenerateToken');
-		o.description = _('Generates a random token and fills the field above.');
+			group.style.display = 'flex';
+			group.style.alignItems = 'center';
+			group.style.gap = '0.5rem';
+
+			if (input) {
+				input.style.flex = '1 1 auto';
+			}
+
+			button = E('button', {
+				'class': 'cbi-button cbi-button-action',
+				'type': 'button',
+				'click': ui.createHandlerFn(this, function(ev) {
+					var tokenInput = input || (ev && ev.target && ev.target.parentNode ? ev.target.parentNode.querySelector('input') : null);
+					if (!tokenInput)
+						return;
+					tokenInput.value = generateTokenHex(24);
+					tokenInput.dispatchEvent(new Event('input', { bubbles: true }));
+					tokenInput.dispatchEvent(new Event('change', { bubbles: true }));
+					tokenInput.focus();
+				}, this.option)
+			}, [_('Generate token')]);
+
+			group.appendChild(button);
+			return node;
+		};
 
 		s = m.section(form.NamedSection, 'main', 'main', _('Tools'));
 		s.anonymous = true;
