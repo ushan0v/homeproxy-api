@@ -222,6 +222,7 @@ ensure_service_config() {
 	[ -n "$(get_uci "$UCI_CONFIG.main.config")" ] || uci -q set "$UCI_CONFIG.main.config=/var/run/homeproxy/sing-box-c.json"
 	[ -n "$(get_uci "$UCI_CONFIG.main.access_token")" ] || uci -q set "$UCI_CONFIG.main.access_token="
 	uci -q delete "$UCI_CONFIG.main.allow_origin" >/dev/null 2>&1 || true
+	uci -q delete "$UCI_CONFIG.main.clash_api_port" >/dev/null 2>&1 || true
 	uci -q commit "$UCI_CONFIG"
 }
 
