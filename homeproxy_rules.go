@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,6 +15,7 @@ const (
 	homeproxyUCIConfigPath       = "/etc/config/homeproxy"
 	homeproxyGenerateClientUCode = "/etc/homeproxy/scripts/generate_client.uc"
 	homeproxyClientConfigPath    = "/var/run/homeproxy/sing-box-c.json"
+	homeproxyDHCPLeasesPath      = "/tmp/dhcp.leases"
 )
 
 type uciSection struct {
@@ -71,32 +73,42 @@ type rulesListResponse struct {
 }
 
 type rulesUpdatePayload struct {
-	RuleSet              []string `json:"ruleSet,omitempty"`
-	RuleSetSnake         []string `json:"rule_set,omitempty"`
-	Domain               []string `json:"domain,omitempty"`
-	DomainSuffix         []string `json:"domainSuffix,omitempty"`
-	DomainSuffixSnake    []string `json:"domain_suffix,omitempty"`
-	DomainKeyword        []string `json:"domainKeyword,omitempty"`
-	DomainKeywordSnake   []string `json:"domain_keyword,omitempty"`
-	DomainRegex          []string `json:"domainRegex,omitempty"`
-	DomainRegexSnake     []string `json:"domain_regex,omitempty"`
-	IPCIDR               []string `json:"ipCidr,omitempty"`
-	IPCIDRSnake          []string `json:"ip_cidr,omitempty"`
-	SourceIPCIDR         []string `json:"sourceIpCidr,omitempty"`
-	SourceIPCIDRSnake    []string `json:"source_ip_cidr,omitempty"`
-	SourcePort           []string `json:"sourcePort,omitempty"`
-	SourcePortSnake      []string `json:"source_port,omitempty"`
-	SourcePortRange      []string `json:"sourcePortRange,omitempty"`
-	SourcePortRangeSnake []string `json:"source_port_range,omitempty"`
-	Port                 []string `json:"port,omitempty"`
-	PortRange            []string `json:"portRange,omitempty"`
-	PortRangeSnake       []string `json:"port_range,omitempty"`
+	RuleSet              *[]string `json:"ruleSet,omitempty"`
+	RuleSetSnake         *[]string `json:"rule_set,omitempty"`
+	Domain               *[]string `json:"domain,omitempty"`
+	DomainSuffix         *[]string `json:"domainSuffix,omitempty"`
+	DomainSuffixSnake    *[]string `json:"domain_suffix,omitempty"`
+	DomainKeyword        *[]string `json:"domainKeyword,omitempty"`
+	DomainKeywordSnake   *[]string `json:"domain_keyword,omitempty"`
+	DomainRegex          *[]string `json:"domainRegex,omitempty"`
+	DomainRegexSnake     *[]string `json:"domain_regex,omitempty"`
+	IPCIDR               *[]string `json:"ipCidr,omitempty"`
+	IPCIDRSnake          *[]string `json:"ip_cidr,omitempty"`
+	SourceIPCIDR         *[]string `json:"sourceIpCidr,omitempty"`
+	SourceIPCIDRSnake    *[]string `json:"source_ip_cidr,omitempty"`
+	SourcePort           *[]string `json:"sourcePort,omitempty"`
+	SourcePortSnake      *[]string `json:"source_port,omitempty"`
+	SourcePortRange      *[]string `json:"sourcePortRange,omitempty"`
+	SourcePortRangeSnake *[]string `json:"source_port_range,omitempty"`
+	Port                 *[]string `json:"port,omitempty"`
+	PortRange            *[]string `json:"portRange,omitempty"`
+	PortRangeSnake       *[]string `json:"port_range,omitempty"`
+}
+
+type rulesUpdateOutbound struct {
+	Class  string `json:"class,omitempty"`
+	Node   string `json:"node,omitempty"`
+	Tag    string `json:"tag,omitempty"`
+	UCITag string `json:"uciTag,omitempty"`
 }
 
 type rulesUpdateRequest struct {
-	Tag    string             `json:"tag,omitempty"`
-	ID     string             `json:"id,omitempty"`
-	Config rulesUpdatePayload `json:"config"`
+	Tag      string               `json:"tag,omitempty"`
+	ID       string               `json:"id,omitempty"`
+	Name     *string              `json:"name,omitempty"`
+	Label    *string              `json:"label,omitempty"`
+	Outbound *rulesUpdateOutbound `json:"outbound,omitempty"`
+	Config   rulesUpdatePayload   `json:"config"`
 }
 
 type rulesUpdateResponse struct {
@@ -105,6 +117,35 @@ type rulesUpdateResponse struct {
 	ID        string    `json:"id"`
 	Tag       string    `json:"tag"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type rulesCreateRequest struct {
+	Tag      string               `json:"tag,omitempty"`
+	ID       string               `json:"id,omitempty"`
+	Name     *string              `json:"name,omitempty"`
+	Label    *string              `json:"label,omitempty"`
+	Enabled  *bool                `json:"enabled,omitempty"`
+	Outbound *rulesUpdateOutbound `json:"outbound,omitempty"`
+	Config   rulesUpdatePayload   `json:"config"`
+}
+
+type rulesCreateResponse struct {
+	Created   bool      `json:"created"`
+	ID        string    `json:"id"`
+	Tag       string    `json:"tag"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type rulesDeleteRequest struct {
+	Tag string `json:"tag,omitempty"`
+	ID  string `json:"id,omitempty"`
+}
+
+type rulesDeleteResponse struct {
+	Deleted   bool      `json:"deleted"`
+	ID        string    `json:"id"`
+	Tag       string    `json:"tag"`
+	DeletedAt time.Time `json:"deletedAt"`
 }
 
 type rulesHotReloadResponse struct {
@@ -132,18 +173,70 @@ type homeproxyServiceActionResponse struct {
 	CheckedAt time.Time `json:"checkedAt"`
 }
 
+type routingNodeView struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Enabled     bool   `json:"enabled"`
+	Node        string `json:"node"`
+	Tag         string `json:"tag"`
+	OutboundTag string `json:"outboundTag"`
+}
+
+type routingNodesListResponse struct {
+	ConfigPath string            `json:"configPath"`
+	Nodes      []routingNodeView `json:"nodes"`
+}
+
+type ruleSetListItem struct {
+	ID             string `json:"id"`
+	Tag            string `json:"tag"`
+	Name           string `json:"name"`
+	Enabled        bool   `json:"enabled"`
+	Type           string `json:"type,omitempty"`
+	Format         string `json:"format,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Path           string `json:"path,omitempty"`
+	UpdateInterval string `json:"updateInterval,omitempty"`
+	Outbound       string `json:"outbound,omitempty"`
+}
+
+type ruleSetsListResponse struct {
+	ConfigPath string            `json:"configPath"`
+	RuleSets   []ruleSetListItem `json:"ruleSets"`
+}
+
+type deviceLeaseView struct {
+	Name          string    `json:"name"`
+	IP            string    `json:"ip"`
+	MAC           string    `json:"mac"`
+	ClientID      string    `json:"clientId,omitempty"`
+	ExpiresAt     time.Time `json:"expiresAt,omitempty"`
+	ExpiresAtUnix int64     `json:"expiresAtUnix,omitempty"`
+	Expired       bool      `json:"expired"`
+}
+
+type devicesListResponse struct {
+	LeasePath string            `json:"leasePath"`
+	Devices   []deviceLeaseView `json:"devices"`
+}
+
+type listPatch struct {
+	Set    bool
+	Values []string
+}
+
 type normalizedRuleConfig struct {
-	RuleSet         []string
-	Domain          []string
-	DomainSuffix    []string
-	DomainKeyword   []string
-	DomainRegex     []string
-	IPCIDR          []string
-	SourceIPCIDR    []string
-	SourcePort      []string
-	SourcePortRange []string
-	Port            []string
-	PortRange       []string
+	RuleSet         listPatch
+	Domain          listPatch
+	DomainSuffix    listPatch
+	DomainKeyword   listPatch
+	DomainRegex     listPatch
+	IPCIDR          listPatch
+	SourceIPCIDR    listPatch
+	SourcePort      listPatch
+	SourcePortRange listPatch
+	Port            listPatch
+	PortRange       listPatch
 }
 
 func parseListLine(line string) (key string, value string, ok bool) {
@@ -334,26 +427,57 @@ func normalizeList(values []string, limit int) []string {
 	return out
 }
 
-func firstNonEmpty(primary []string, fallback []string) []string {
-	if len(primary) > 0 {
-		return primary
+func chooseListPatch(primary *[]string, fallback *[]string, limit int) listPatch {
+	src := primary
+	if src == nil {
+		src = fallback
 	}
-	return fallback
+	if src == nil {
+		return listPatch{}
+	}
+	return listPatch{
+		Set:    true,
+		Values: normalizeList(*src, limit),
+	}
+}
+
+func chooseSingleListPatch(src *[]string, limit int) listPatch {
+	if src == nil {
+		return listPatch{}
+	}
+	return listPatch{
+		Set:    true,
+		Values: normalizeList(*src, limit),
+	}
+}
+
+func (c normalizedRuleConfig) hasAny() bool {
+	return c.RuleSet.Set ||
+		c.Domain.Set ||
+		c.DomainSuffix.Set ||
+		c.DomainKeyword.Set ||
+		c.DomainRegex.Set ||
+		c.IPCIDR.Set ||
+		c.SourceIPCIDR.Set ||
+		c.SourcePort.Set ||
+		c.SourcePortRange.Set ||
+		c.Port.Set ||
+		c.PortRange.Set
 }
 
 func (p rulesUpdatePayload) normalize() normalizedRuleConfig {
 	return normalizedRuleConfig{
-		RuleSet:         normalizeList(firstNonEmpty(p.RuleSet, p.RuleSetSnake), 1024),
-		Domain:          normalizeList(p.Domain, 4096),
-		DomainSuffix:    normalizeList(firstNonEmpty(p.DomainSuffix, p.DomainSuffixSnake), 4096),
-		DomainKeyword:   normalizeList(firstNonEmpty(p.DomainKeyword, p.DomainKeywordSnake), 4096),
-		DomainRegex:     normalizeList(firstNonEmpty(p.DomainRegex, p.DomainRegexSnake), 4096),
-		IPCIDR:          normalizeList(firstNonEmpty(p.IPCIDR, p.IPCIDRSnake), 4096),
-		SourceIPCIDR:    normalizeList(firstNonEmpty(p.SourceIPCIDR, p.SourceIPCIDRSnake), 4096),
-		SourcePort:      normalizeList(firstNonEmpty(p.SourcePort, p.SourcePortSnake), 1024),
-		SourcePortRange: normalizeList(firstNonEmpty(p.SourcePortRange, p.SourcePortRangeSnake), 1024),
-		Port:            normalizeList(p.Port, 1024),
-		PortRange:       normalizeList(firstNonEmpty(p.PortRange, p.PortRangeSnake), 1024),
+		RuleSet:         chooseListPatch(p.RuleSet, p.RuleSetSnake, 1024),
+		Domain:          chooseSingleListPatch(p.Domain, 4096),
+		DomainSuffix:    chooseListPatch(p.DomainSuffix, p.DomainSuffixSnake, 4096),
+		DomainKeyword:   chooseListPatch(p.DomainKeyword, p.DomainKeywordSnake, 4096),
+		DomainRegex:     chooseListPatch(p.DomainRegex, p.DomainRegexSnake, 4096),
+		IPCIDR:          chooseListPatch(p.IPCIDR, p.IPCIDRSnake, 4096),
+		SourceIPCIDR:    chooseListPatch(p.SourceIPCIDR, p.SourceIPCIDRSnake, 4096),
+		SourcePort:      chooseListPatch(p.SourcePort, p.SourcePortSnake, 1024),
+		SourcePortRange: chooseListPatch(p.SourcePortRange, p.SourcePortRangeSnake, 1024),
+		Port:            chooseSingleListPatch(p.Port, 1024),
+		PortRange:       chooseListPatch(p.PortRange, p.PortRangeSnake, 1024),
 	}
 }
 
@@ -370,16 +494,191 @@ func runCommandCombined(name string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-func updateRuleListsInUCI(ruleID string, cfg normalizedRuleConfig) error {
-	sectionTypeOut, err := runCommandCombined("uci", "-q", "get", "homeproxy."+ruleID)
+func getUCISectionType(sectionID string) (string, error) {
+	out, err := runCommandCombined("uci", "-q", "get", "homeproxy."+sectionID)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func ensureRoutingRuleSection(ruleID string) error {
+	sectionType, err := getUCISectionType(ruleID)
 	if err != nil {
 		return fmt.Errorf("rule %q not found: %w", ruleID, err)
 	}
-	if strings.TrimSpace(sectionTypeOut) != "routing_rule" {
+	if sectionType != "routing_rule" {
 		return fmt.Errorf("%q is not a routing_rule section", ruleID)
 	}
+	return nil
+}
 
-	managed := map[string][]string{
+func setUCIOption(ruleID string, key string, value string) error {
+	_, err := runCommandCombined("uci", "-q", "set", fmt.Sprintf("homeproxy.%s.%s=%s", ruleID, key, value))
+	if err != nil {
+		return fmt.Errorf("set %s failed: %w", key, err)
+	}
+	return nil
+}
+
+func deleteUCIOption(ruleID string, key string) error {
+	_, err := runCommandCombined("uci", "-q", "delete", fmt.Sprintf("homeproxy.%s.%s", ruleID, key))
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "entry not found") || strings.Contains(lower, "not found") || strings.Contains(lower, "exit status 1") {
+			return nil
+		}
+		return fmt.Errorf("delete %s failed: %w", key, err)
+	}
+	return nil
+}
+
+func setOrDeleteUCIOption(ruleID string, key string, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return deleteUCIOption(ruleID, key)
+	}
+	return setUCIOption(ruleID, key, value)
+}
+
+func applyUCIListOption(ruleID string, key string, values []string) error {
+	if err := deleteUCIOption(ruleID, key); err != nil {
+		return err
+	}
+	for _, value := range values {
+		_, err := runCommandCombined("uci", "-q", "add_list", fmt.Sprintf("homeproxy.%s.%s=%s", ruleID, key, value))
+		if err != nil {
+			return fmt.Errorf("set %s failed: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func commitHomeproxyConfig() error {
+	_, err := runCommandCombined("uci", "-q", "commit", "homeproxy")
+	if err != nil {
+		return fmt.Errorf("uci commit failed: %w", err)
+	}
+	return nil
+}
+
+func deriveRuleClassNodeFromTag(value string) (string, string) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", ""
+	}
+	lower := strings.ToLower(raw)
+	switch lower {
+	case "direct", "direct-out":
+		return "direct", ""
+	case "block", "block-out", "reject", "reject-out":
+		return "block", ""
+	}
+	if strings.HasPrefix(raw, "cfg-") && strings.HasSuffix(raw, "-out") && len(raw) > len("cfg--out") {
+		return "proxy", raw[len("cfg-") : len(raw)-len("-out")]
+	}
+	return "proxy", raw
+}
+
+func routingNodeIDSet(sections []uciSection) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, section := range sections {
+		if section.Type != "routing_node" {
+			continue
+		}
+		out[section.Name] = struct{}{}
+	}
+	return out
+}
+
+func resolveRuleOutboundUpdate(spec *rulesUpdateOutbound, sections []uciSection) (string, string, error) {
+	if spec == nil {
+		return "", "", fmt.Errorf("missing outbound patch")
+	}
+	class := strings.ToLower(strings.TrimSpace(spec.Class))
+	node := strings.TrimSpace(spec.Node)
+	if node == "" {
+		node = strings.TrimSpace(spec.UCITag)
+	}
+	tag := strings.TrimSpace(spec.Tag)
+
+	if class == "" && tag != "" {
+		tagClass, tagNode := deriveRuleClassNodeFromTag(tag)
+		class = tagClass
+		if node == "" {
+			node = tagNode
+		}
+	}
+	if class == "" && node != "" {
+		nodeClass, nodeID := deriveRuleClassNodeFromTag(node)
+		if nodeClass != "" {
+			class = nodeClass
+		}
+		if nodeID != "" {
+			node = nodeID
+		}
+	}
+
+	switch class {
+	case "direct":
+		return "route", "direct-out", nil
+	case "block":
+		return "reject", "", nil
+	case "proxy":
+	default:
+		return "", "", fmt.Errorf("unsupported outbound.class: %q", spec.Class)
+	}
+
+	if node == "" {
+		return "", "", fmt.Errorf("proxy outbound requires node")
+	}
+	proxyClass, proxyNode := deriveRuleClassNodeFromTag(node)
+	if proxyClass == "direct" {
+		return "route", "direct-out", nil
+	}
+	if proxyClass == "block" {
+		return "reject", "", nil
+	}
+	if proxyNode != "" {
+		node = proxyNode
+	}
+
+	nodes := routingNodeIDSet(sections)
+	if _, ok := nodes[node]; !ok {
+		return "", "", fmt.Errorf("routing node %q not found", node)
+	}
+	return "route", node, nil
+}
+
+func applyRuleOutboundUpdate(ruleID string, action string, outbound string) error {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "reject":
+		if err := setUCIOption(ruleID, "action", "reject"); err != nil {
+			return err
+		}
+		if err := deleteUCIOption(ruleID, "outbound"); err != nil {
+			return err
+		}
+		return nil
+	case "", "route", "route-options":
+		if err := setUCIOption(ruleID, "action", "route"); err != nil {
+			return err
+		}
+		outbound = strings.TrimSpace(outbound)
+		if outbound == "" {
+			outbound = "direct-out"
+		}
+		if err := setUCIOption(ruleID, "outbound", outbound); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported outbound action: %q", action)
+	}
+}
+
+func applyRuleListPatchInUCI(ruleID string, cfg normalizedRuleConfig) error {
+	managed := map[string]listPatch{
 		"rule_set":          cfg.RuleSet,
 		"domain":            cfg.Domain,
 		"domain_suffix":     cfg.DomainSuffix,
@@ -392,21 +691,118 @@ func updateRuleListsInUCI(ruleID string, cfg normalizedRuleConfig) error {
 		"port":              cfg.Port,
 		"port_range":        cfg.PortRange,
 	}
-
-	for key, values := range managed {
-		_, _ = runCommandCombined("uci", "-q", "delete", fmt.Sprintf("homeproxy.%s.%s", ruleID, key))
-		for _, value := range values {
-			_, err = runCommandCombined("uci", "-q", "add_list", fmt.Sprintf("homeproxy.%s.%s=%s", ruleID, key, value))
-			if err != nil {
-				return fmt.Errorf("set %s failed: %w", key, err)
-			}
+	for key, patch := range managed {
+		if !patch.Set {
+			continue
+		}
+		if err := applyUCIListOption(ruleID, key, patch.Values); err != nil {
+			return err
 		}
 	}
-	_, err = runCommandCombined("uci", "-q", "commit", "homeproxy")
-	if err != nil {
-		return fmt.Errorf("uci commit failed: %w", err)
-	}
 	return nil
+}
+
+func resolveRuleNameUpdate(reqName *string, reqLabel *string) (string, bool) {
+	if reqName != nil {
+		return strings.TrimSpace(*reqName), true
+	}
+	if reqLabel != nil {
+		return strings.TrimSpace(*reqLabel), true
+	}
+	return "", false
+}
+
+func createRoutingRuleSection(reqID string) (string, error) {
+	ruleID := routingSectionFromAnyTag(reqID)
+	ruleID = strings.TrimSpace(ruleID)
+	if ruleID != "" {
+		if strings.Contains(ruleID, " ") {
+			return "", fmt.Errorf("invalid rule id")
+		}
+		if _, err := getUCISectionType(ruleID); err == nil {
+			return "", fmt.Errorf("rule %q already exists", ruleID)
+		}
+		_, err := runCommandCombined("uci", "-q", "set", "homeproxy."+ruleID+"=routing_rule")
+		if err != nil {
+			return "", fmt.Errorf("create rule failed: %w", err)
+		}
+		return ruleID, nil
+	}
+	out, err := runCommandCombined("uci", "-q", "add", "homeproxy", "routing_rule")
+	if err != nil {
+		return "", fmt.Errorf("create rule failed: %w", err)
+	}
+	ruleID = strings.TrimSpace(out)
+	if ruleID == "" {
+		return "", fmt.Errorf("create rule failed: empty id")
+	}
+	return ruleID, nil
+}
+
+func parseDHCPLeases(path string) ([]deviceLeaseView, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []deviceLeaseView{}, nil
+		}
+		return nil, err
+	}
+	out := make([]deviceLeaseView, 0)
+	now := time.Now().UTC()
+	for _, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		ip := strings.TrimSpace(fields[2])
+		if ip == "" {
+			continue
+		}
+		name := strings.TrimSpace(fields[3])
+		if name == "" || name == "*" {
+			name = ip
+		}
+		clientID := ""
+		if len(fields) > 4 {
+			clientID = strings.TrimSpace(fields[4])
+		}
+		expiresAtUnix, _ := strconv.ParseInt(fields[0], 10, 64)
+		expiresAt := time.Time{}
+		expired := false
+		if expiresAtUnix > 0 {
+			expiresAt = time.Unix(expiresAtUnix, 0).UTC()
+			expired = expiresAt.Before(now)
+		}
+		out = append(out, deviceLeaseView{
+			Name:          name,
+			IP:            ip,
+			MAC:           strings.TrimSpace(fields[1]),
+			ClientID:      clientID,
+			ExpiresAt:     expiresAt,
+			ExpiresAtUnix: expiresAtUnix,
+			Expired:       expired,
+		})
+	}
+	return out, nil
+}
+
+func firstNonEmptyString(primary string, fallback string) string {
+	primary = strings.TrimSpace(primary)
+	if primary != "" {
+		return primary
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func boolToUCIValue(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
 }
 
 func listRuleSetMeta(sections []uciSection) map[string]ruleSetRef {
@@ -553,9 +949,53 @@ func (s *matchService) handleRulesUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	cfg := req.Config.normalize()
-	if err := updateRuleListsInUCI(ruleID, cfg); err != nil {
+	if err := ensureRoutingRuleSection(ruleID); err != nil {
 		http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	changed := false
+	if name, hasName := resolveRuleNameUpdate(req.Name, req.Label); hasName {
+		if err := setOrDeleteUCIOption(ruleID, "label", name); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		changed = true
+	}
+
+	if req.Outbound != nil {
+		sections, err := parseUCISections(homeproxyUCIConfigPath)
+		if err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		action, outbound, err := resolveRuleOutboundUpdate(req.Outbound, sections)
+		if err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := applyRuleOutboundUpdate(ruleID, action, outbound); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		changed = true
+	}
+
+	cfg := req.Config.normalize()
+	if cfg.hasAny() {
+		if err := applyRuleListPatchInUCI(ruleID, cfg); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		changed = true
+	}
+
+	if !changed {
+		http.Error(w, "no changes provided", http.StatusBadRequest)
+		return
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -565,6 +1005,260 @@ func (s *matchService) handleRulesUpdate(w http.ResponseWriter, r *http.Request)
 		ID:        ruleID,
 		Tag:       routingRuleTag(ruleID),
 		UpdatedAt: time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRulesCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req rulesCreateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ruleID, err := createRoutingRuleSection(firstNonEmptyString(req.ID, req.Tag))
+	if err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	if err := setUCIOption(ruleID, "enabled", boolToUCIValue(enabled)); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := setUCIOption(ruleID, "mode", "default"); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	name, hasName := resolveRuleNameUpdate(req.Name, req.Label)
+	if !hasName {
+		name = ruleID
+	}
+	if err := setOrDeleteUCIOption(ruleID, "label", name); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	outboundAction := "route"
+	outboundValue := "direct-out"
+	if req.Outbound != nil {
+		sections, loadErr := parseUCISections(homeproxyUCIConfigPath)
+		if loadErr != nil {
+			http.Error(w, "create failed: "+loadErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		action, outbound, resolveErr := resolveRuleOutboundUpdate(req.Outbound, sections)
+		if resolveErr != nil {
+			http.Error(w, "create failed: "+resolveErr.Error(), http.StatusBadRequest)
+			return
+		}
+		outboundAction = action
+		outboundValue = outbound
+	}
+	if err := applyRuleOutboundUpdate(ruleID, outboundAction, outboundValue); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	cfg := req.Config.normalize()
+	if cfg.hasAny() {
+		if err := applyRuleListPatchInUCI(ruleID, cfg); err != nil {
+			http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := rulesCreateResponse{
+		Created:   true,
+		ID:        ruleID,
+		Tag:       routingRuleTag(ruleID),
+		CreatedAt: time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRulesDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req rulesDeleteRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ruleID := routingSectionFromAnyTag(firstNonEmptyString(req.ID, req.Tag))
+	if ruleID == "" {
+		http.Error(w, "missing rule tag/id", http.StatusBadRequest)
+		return
+	}
+	if err := ensureRoutingRuleSection(ruleID); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := runCommandCombined("uci", "-q", "delete", "homeproxy."+ruleID); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := rulesDeleteResponse{
+		Deleted:   true,
+		ID:        ruleID,
+		Tag:       routingRuleTag(ruleID),
+		DeletedAt: time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRoutingNodesList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	nodes := make([]routingNodeView, 0)
+	for _, section := range sections {
+		if section.Type != "routing_node" {
+			continue
+		}
+		name := strings.TrimSpace(section.Options["label"])
+		if name == "" {
+			name = section.Name
+		}
+		nodes = append(nodes, routingNodeView{
+			ID:          section.Name,
+			Name:        name,
+			Enabled:     strings.TrimSpace(section.Options["enabled"]) != "0",
+			Node:        strings.TrimSpace(section.Options["node"]),
+			Tag:         "cfg-" + section.Name + "-out",
+			OutboundTag: routingNodeOutboundTagFromSection(section),
+		})
+	}
+
+	resp := routingNodesListResponse{
+		ConfigPath: homeproxyUCIConfigPath,
+		Nodes:      nodes,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRuleSetsList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	ruleSets := make([]ruleSetListItem, 0)
+	for _, section := range sections {
+		if section.Type != "ruleset" {
+			continue
+		}
+		name := strings.TrimSpace(section.Options["label"])
+		if name == "" {
+			name = section.Name
+		}
+		ruleSets = append(ruleSets, ruleSetListItem{
+			ID:             section.Name,
+			Tag:            routingRuleTag(section.Name),
+			Name:           name,
+			Enabled:        strings.TrimSpace(section.Options["enabled"]) != "0",
+			Type:           strings.TrimSpace(section.Options["type"]),
+			Format:         strings.TrimSpace(section.Options["format"]),
+			URL:            strings.TrimSpace(section.Options["url"]),
+			Path:           strings.TrimSpace(section.Options["path"]),
+			UpdateInterval: strings.TrimSpace(section.Options["update_interval"]),
+			Outbound:       strings.TrimSpace(section.Options["outbound"]),
+		})
+	}
+
+	resp := ruleSetsListResponse{
+		ConfigPath: homeproxyUCIConfigPath,
+		RuleSets:   ruleSets,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleDevicesList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	devices, err := parseDHCPLeases(homeproxyDHCPLeasesPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := devicesListResponse{
+		LeasePath: homeproxyDHCPLeasesPath,
+		Devices:   devices,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
