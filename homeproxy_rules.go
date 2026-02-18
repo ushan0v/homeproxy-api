@@ -1,11 +1,17 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +23,8 @@ const (
 	homeproxyClientConfigPath    = "/var/run/homeproxy/sing-box-c.json"
 	homeproxyDHCPLeasesPath      = "/tmp/dhcp.leases"
 )
+
+var uciIdentifierRegex = regexp.MustCompile(`[^A-Za-z0-9_]+`)
 
 type uciSection struct {
 	Type    string
@@ -178,6 +186,7 @@ type routingNodeView struct {
 	Name        string `json:"name"`
 	Enabled     bool   `json:"enabled"`
 	Node        string `json:"node"`
+	NodeName    string `json:"nodeName,omitempty"`
 	Tag         string `json:"tag"`
 	OutboundTag string `json:"outboundTag"`
 }
@@ -218,6 +227,116 @@ type deviceLeaseView struct {
 type devicesListResponse struct {
 	LeasePath string            `json:"leasePath"`
 	Devices   []deviceLeaseView `json:"devices"`
+}
+
+type nodeCreateRequest struct {
+	Link      string `json:"link,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Name      string `json:"name"`
+	Outbound  string `json:"outbound,omitempty"`
+	ID        string `json:"id,omitempty"`
+	NodeID    string `json:"nodeId,omitempty"`
+	RoutingID string `json:"routingId,omitempty"`
+	NodeLabel string `json:"nodeLabel,omitempty"`
+}
+
+type nodeCreateResponse struct {
+	Created         bool      `json:"created"`
+	NodeID          string    `json:"nodeId"`
+	NodeTag         string    `json:"nodeTag"`
+	NodeName        string    `json:"nodeName"`
+	RoutingID       string    `json:"routingId"`
+	RoutingTag      string    `json:"routingTag"`
+	RoutingName     string    `json:"routingName"`
+	RoutingOutbound string    `json:"routingOutbound"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+type nodeDeleteRequest struct {
+	ID  string `json:"id,omitempty"`
+	Tag string `json:"tag,omitempty"`
+}
+
+type nodeDeleteResponse struct {
+	Deleted           bool      `json:"deleted"`
+	NodeID            string    `json:"nodeId"`
+	NodeTag           string    `json:"nodeTag"`
+	RemovedRoutingIDs []string  `json:"removedRoutingIds"`
+	UpdatedRules      int       `json:"updatedRules"`
+	UpdatedRuleSets   int       `json:"updatedRuleSets"`
+	DeletedAt         time.Time `json:"deletedAt"`
+}
+
+type nodeRenameRequest struct {
+	ID   string `json:"id,omitempty"`
+	Tag  string `json:"tag,omitempty"`
+	Name string `json:"name"`
+}
+
+type nodeRenameResponse struct {
+	Updated           bool      `json:"updated"`
+	NodeID            string    `json:"nodeId"`
+	NodeTag           string    `json:"nodeTag"`
+	Name              string    `json:"name"`
+	UpdatedRoutingIDs []string  `json:"updatedRoutingIds"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+type ruleSetCreateRequest struct {
+	ID                string `json:"id,omitempty"`
+	Tag               string `json:"tag,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Label             string `json:"label,omitempty"`
+	Enabled           *bool  `json:"enabled,omitempty"`
+	Format            string `json:"format,omitempty"`
+	URL               string `json:"url"`
+	Outbound          string `json:"outbound,omitempty"`
+	UpdateInterval    string `json:"updateInterval,omitempty"`
+	UpdateIntervalUCI string `json:"update_interval,omitempty"`
+}
+
+type ruleSetCreateResponse struct {
+	Created   bool      `json:"created"`
+	ID        string    `json:"id"`
+	Tag       string    `json:"tag"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type ruleSetUpdateRequest struct {
+	ID                string  `json:"id,omitempty"`
+	Tag               string  `json:"tag,omitempty"`
+	Name              *string `json:"name,omitempty"`
+	Label             *string `json:"label,omitempty"`
+	Enabled           *bool   `json:"enabled,omitempty"`
+	Format            *string `json:"format,omitempty"`
+	URL               *string `json:"url,omitempty"`
+	Outbound          *string `json:"outbound,omitempty"`
+	UpdateInterval    *string `json:"updateInterval,omitempty"`
+	UpdateIntervalUCI *string `json:"update_interval,omitempty"`
+}
+
+type ruleSetUpdateResponse struct {
+	Updated   bool      `json:"updated"`
+	ID        string    `json:"id"`
+	Tag       string    `json:"tag"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type ruleSetDeleteRequest struct {
+	ID  string `json:"id,omitempty"`
+	Tag string `json:"tag,omitempty"`
+}
+
+type ruleSetDeleteResponse struct {
+	Deleted      bool      `json:"deleted"`
+	ID           string    `json:"id"`
+	Tag          string    `json:"tag"`
+	UpdatedRules int       `json:"updatedRules"`
+	DeletedAt    time.Time `json:"deletedAt"`
+}
+
+type parsedShareNode struct {
+	Options map[string]interface{}
 }
 
 type listPatch struct {
@@ -805,6 +924,1032 @@ func boolToUCIValue(value bool) string {
 	return "0"
 }
 
+type subscriptionDefaults struct {
+	AllowInsecure  bool
+	PacketEncoding string
+}
+
+func md5Hex(value string) string {
+	sum := md5.Sum([]byte(value))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sanitizeUCIIdentifier(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	raw = uciIdentifierRegex.ReplaceAllString(raw, "_")
+	raw = strings.Trim(raw, "_")
+	return raw
+}
+
+func decodeBase64Loose(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("empty base64 input")
+	}
+	value = strings.ReplaceAll(value, "-", "+")
+	value = strings.ReplaceAll(value, "_", "/")
+	switch len(value) % 4 {
+	case 2:
+		value += "=="
+	case 3:
+		value += "="
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
+
+func decodeShareComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if decoded, err := url.PathUnescape(value); err == nil {
+		return decoded
+	}
+	if decoded, err := url.QueryUnescape(value); err == nil {
+		return decoded
+	}
+	return value
+}
+
+func compactStringValues(values []string, limit int) []string {
+	if limit <= 0 {
+		limit = 128
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func asString(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case float64:
+		return strings.TrimSpace(strconv.FormatFloat(typed, 'f', -1, 64))
+	case bool:
+		if typed {
+			return "1"
+		}
+		return "0"
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
+}
+
+func mapString(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	return asString(m[key])
+}
+
+func splitCommaValues(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}
+	}
+	parts := strings.Split(raw, ",")
+	return compactStringValues(parts, 64)
+}
+
+func setNodeOption(out map[string]interface{}, key string, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	out[key] = value
+}
+
+func setNodeOptionList(out map[string]interface{}, key string, values []string) {
+	values = compactStringValues(values, 64)
+	if len(values) == 0 {
+		return
+	}
+	out[key] = values
+}
+
+func parseShareLink(raw string) (*parsedShareNode, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("share link is empty")
+	}
+
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "vmess://") {
+		opts, err := parseVMessShareLink(raw)
+		if err != nil {
+			return nil, err
+		}
+		return finalizeParsedShareNode(opts)
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid share link: %w", err)
+	}
+	if u.Scheme == "" {
+		return nil, fmt.Errorf("missing share link scheme")
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	var opts map[string]interface{}
+	switch scheme {
+	case "anytls":
+		opts, err = parseAnyTLSShareLink(u)
+	case "http", "https":
+		opts, err = parseHTTPShareLink(u, scheme)
+	case "hysteria":
+		opts, err = parseHysteriaShareLink(u)
+	case "hysteria2", "hy2":
+		opts, err = parseHysteria2ShareLink(u)
+	case "socks", "socks4", "socks4a", "socsk5", "socks5h":
+		opts, err = parseSocksShareLink(u, scheme)
+	case "ss":
+		opts, err = parseSSShareLink(raw)
+	case "trojan":
+		opts, err = parseTrojanShareLink(u)
+	case "tuic":
+		opts, err = parseTuicShareLink(u)
+	case "vless":
+		opts, err = parseVlessShareLink(u)
+	default:
+		return nil, fmt.Errorf("unsupported share link scheme: %s", scheme)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return finalizeParsedShareNode(opts)
+}
+
+func parseAnyTLSShareLink(u *url.URL) (map[string]interface{}, error) {
+	if u.User == nil || strings.TrimSpace(u.User.Username()) == "" {
+		return nil, fmt.Errorf("anytls link missing password")
+	}
+	opts := map[string]interface{}{
+		"type": "anytls",
+		"tls":  "1",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	setNodeOption(opts, "password", decodeShareComponent(u.User.Username()))
+	setNodeOption(opts, "tls_sni", u.Query().Get("sni"))
+	if strings.EqualFold(u.Query().Get("insecure"), "1") {
+		setNodeOption(opts, "tls_insecure", "1")
+	} else {
+		setNodeOption(opts, "tls_insecure", "0")
+	}
+	return opts, nil
+}
+
+func parseHTTPShareLink(u *url.URL, scheme string) (map[string]interface{}, error) {
+	opts := map[string]interface{}{
+		"type": "http",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	if u.User != nil {
+		setNodeOption(opts, "username", decodeShareComponent(u.User.Username()))
+		if password, ok := u.User.Password(); ok {
+			setNodeOption(opts, "password", decodeShareComponent(password))
+		}
+	}
+	if scheme == "https" {
+		setNodeOption(opts, "tls", "1")
+	} else {
+		setNodeOption(opts, "tls", "0")
+	}
+	return opts, nil
+}
+
+func parseHysteriaShareLink(u *url.URL) (map[string]interface{}, error) {
+	params := u.Query()
+	protocol := firstNonEmptyValue(params.Get("protocol"), "udp")
+	if protocol != "udp" {
+		return nil, fmt.Errorf("unsupported hysteria protocol: %s", protocol)
+	}
+	opts := map[string]interface{}{
+		"type":              "hysteria",
+		"tls":               "1",
+		"hysteria_protocol": protocol,
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	if auth := strings.TrimSpace(params.Get("auth")); auth != "" {
+		setNodeOption(opts, "hysteria_auth_type", "string")
+		setNodeOption(opts, "hysteria_auth_payload", auth)
+	}
+	setNodeOption(opts, "hysteria_obfs_password", params.Get("obfsParam"))
+	setNodeOption(opts, "hysteria_down_mbps", params.Get("downmbps"))
+	setNodeOption(opts, "hysteria_up_mbps", params.Get("upmbps"))
+	setNodeOption(opts, "tls_sni", params.Get("peer"))
+	setNodeOption(opts, "tls_alpn", params.Get("alpn"))
+	if strings.EqualFold(params.Get("insecure"), "1") || strings.EqualFold(params.Get("insecure"), "true") {
+		setNodeOption(opts, "tls_insecure", "1")
+	} else {
+		setNodeOption(opts, "tls_insecure", "0")
+	}
+	return opts, nil
+}
+
+func parseHysteria2ShareLink(u *url.URL) (map[string]interface{}, error) {
+	params := u.Query()
+	password := ""
+	if u.User != nil {
+		password = decodeShareComponent(u.User.Username())
+		if pass, ok := u.User.Password(); ok && strings.TrimSpace(pass) != "" {
+			password += ":" + decodeShareComponent(pass)
+		}
+	}
+	opts := map[string]interface{}{
+		"type": "hysteria2",
+		"tls":  "1",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	setNodeOption(opts, "password", password)
+	setNodeOption(opts, "hysteria_obfs_type", params.Get("obfs"))
+	setNodeOption(opts, "hysteria_obfs_password", params.Get("obfs-password"))
+	setNodeOption(opts, "tls_sni", params.Get("sni"))
+	if strings.TrimSpace(params.Get("insecure")) != "" {
+		setNodeOption(opts, "tls_insecure", "1")
+	} else {
+		setNodeOption(opts, "tls_insecure", "0")
+	}
+	return opts, nil
+}
+
+func parseSocksShareLink(u *url.URL, scheme string) (map[string]interface{}, error) {
+	version := "5"
+	if strings.Contains(scheme, "4") {
+		version = "4"
+	}
+	opts := map[string]interface{}{
+		"type":          "socks",
+		"socks_version": version,
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	if u.User != nil {
+		setNodeOption(opts, "username", decodeShareComponent(u.User.Username()))
+		if pass, ok := u.User.Password(); ok {
+			setNodeOption(opts, "password", decodeShareComponent(pass))
+		}
+	}
+	return opts, nil
+}
+
+func parseSSShareLink(raw string) (map[string]interface{}, error) {
+	link := strings.TrimSpace(raw)
+	link = strings.TrimPrefix(link, "ss://")
+	if link == "" {
+		return nil, fmt.Errorf("invalid ss link")
+	}
+
+	label := ""
+	if idx := strings.Index(link, "#"); idx >= 0 {
+		label = decodeShareComponent(link[idx+1:])
+		link = link[:idx]
+	}
+
+	parseURL := func(candidate string) (*url.URL, error) {
+		return url.Parse("http://" + candidate)
+	}
+	u, err := parseURL(link)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ss link: %w", err)
+	}
+
+	method := ""
+	password := ""
+	extractCreds := func(target *url.URL) {
+		if target == nil || target.User == nil {
+			return
+		}
+		user := strings.TrimSpace(target.User.Username())
+		if user == "" {
+			return
+		}
+		if pass, ok := target.User.Password(); ok {
+			method = user
+			password = decodeShareComponent(pass)
+			return
+		}
+		decoded, decErr := decodeBase64Loose(decodeShareComponent(user))
+		if decErr != nil {
+			return
+		}
+		parts := strings.SplitN(decoded, ":", 2)
+		if len(parts) != 2 {
+			return
+		}
+		method = strings.TrimSpace(parts[0])
+		password = parts[1]
+	}
+	extractCreds(u)
+
+	if method == "" || password == "" || u.Hostname() == "" || u.Port() == "" {
+		if decoded, decErr := decodeBase64Loose(link); decErr == nil {
+			if alt, altErr := parseURL(decoded); altErr == nil {
+				u = alt
+				extractCreds(u)
+			}
+		}
+	}
+	if method == "" || password == "" {
+		return nil, fmt.Errorf("invalid ss credentials")
+	}
+
+	pluginName := ""
+	pluginOpts := ""
+	if pluginRaw := strings.TrimSpace(u.Query().Get("plugin")); pluginRaw != "" {
+		parts := strings.SplitN(pluginRaw, ";", 2)
+		pluginName = strings.TrimSpace(parts[0])
+		if pluginName == "simple-obfs" {
+			pluginName = "obfs-local"
+		}
+		if len(parts) > 1 {
+			pluginOpts = strings.TrimSpace(parts[1])
+		}
+	}
+
+	opts := map[string]interface{}{
+		"type":                       "shadowsocks",
+		"label":                      label,
+		"address":                    u.Hostname(),
+		"port":                       firstNonEmptyValue(u.Port(), "80"),
+		"shadowsocks_encrypt_method": method,
+		"password":                   password,
+	}
+	setNodeOption(opts, "shadowsocks_plugin", pluginName)
+	setNodeOption(opts, "shadowsocks_plugin_opts", pluginOpts)
+	return opts, nil
+}
+
+func parseTrojanShareLink(u *url.URL) (map[string]interface{}, error) {
+	if u.User == nil || strings.TrimSpace(u.User.Username()) == "" {
+		return nil, fmt.Errorf("trojan link missing password")
+	}
+	params := u.Query()
+	opts := map[string]interface{}{
+		"type": "trojan",
+		"tls":  "1",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	setNodeOption(opts, "password", decodeShareComponent(u.User.Username()))
+	setNodeOption(opts, "tls_sni", params.Get("sni"))
+	if transport := strings.TrimSpace(params.Get("type")); transport != "" && transport != "tcp" {
+		setNodeOption(opts, "transport", transport)
+		switch transport {
+		case "grpc":
+			setNodeOption(opts, "grpc_servicename", params.Get("serviceName"))
+		case "ws":
+			setNodeOption(opts, "ws_host", decodeShareComponent(params.Get("host")))
+			path := decodeShareComponent(params.Get("path"))
+			if strings.Contains(path, "?ed=") {
+				parts := strings.SplitN(path, "?ed=", 2)
+				setNodeOption(opts, "websocket_early_data_header", "Sec-WebSocket-Protocol")
+				setNodeOption(opts, "websocket_early_data", parts[1])
+				path = parts[0]
+			}
+			setNodeOption(opts, "ws_path", path)
+		}
+	}
+	return opts, nil
+}
+
+func parseTuicShareLink(u *url.URL) (map[string]interface{}, error) {
+	if u.User == nil || strings.TrimSpace(u.User.Username()) == "" {
+		return nil, fmt.Errorf("tuic link missing uuid")
+	}
+	params := u.Query()
+	opts := map[string]interface{}{
+		"type": "tuic",
+		"tls":  "1",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	setNodeOption(opts, "uuid", decodeShareComponent(u.User.Username()))
+	if pass, ok := u.User.Password(); ok {
+		setNodeOption(opts, "password", decodeShareComponent(pass))
+	}
+	setNodeOption(opts, "tuic_congestion_control", params.Get("congestion_control"))
+	setNodeOption(opts, "tuic_udp_relay_mode", params.Get("udp_relay_mode"))
+	setNodeOption(opts, "tls_sni", params.Get("sni"))
+	setNodeOptionList(opts, "tls_alpn", splitCommaValues(decodeShareComponent(params.Get("alpn"))))
+	return opts, nil
+}
+
+func parseVlessShareLink(u *url.URL) (map[string]interface{}, error) {
+	if u.User == nil || strings.TrimSpace(u.User.Username()) == "" {
+		return nil, fmt.Errorf("vless link missing uuid")
+	}
+	params := u.Query()
+	transport := strings.TrimSpace(params.Get("type"))
+	if transport == "" {
+		return nil, fmt.Errorf("vless link missing transport type")
+	}
+	if transport == "kcp" {
+		return nil, fmt.Errorf("unsupported vless transport: kcp")
+	}
+
+	security := strings.TrimSpace(params.Get("security"))
+	opts := map[string]interface{}{
+		"type": "vless",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(u.Fragment))
+	setNodeOption(opts, "address", u.Hostname())
+	setNodeOption(opts, "port", firstNonEmptyValue(u.Port(), "80"))
+	setNodeOption(opts, "uuid", decodeShareComponent(u.User.Username()))
+	if transport != "tcp" {
+		setNodeOption(opts, "transport", transport)
+	}
+	if security == "tls" || security == "xtls" || security == "reality" {
+		setNodeOption(opts, "tls", "1")
+	} else {
+		setNodeOption(opts, "tls", "0")
+	}
+	setNodeOption(opts, "tls_sni", params.Get("sni"))
+	setNodeOptionList(opts, "tls_alpn", splitCommaValues(decodeShareComponent(params.Get("alpn"))))
+	if security == "reality" {
+		setNodeOption(opts, "tls_reality", "1")
+		setNodeOption(opts, "tls_reality_public_key", decodeShareComponent(params.Get("pbk")))
+		setNodeOption(opts, "tls_reality_short_id", params.Get("sid"))
+	}
+	if security == "tls" || security == "reality" {
+		setNodeOption(opts, "vless_flow", params.Get("flow"))
+	}
+	setNodeOption(opts, "tls_utls", params.Get("fp"))
+
+	switch transport {
+	case "grpc":
+		setNodeOption(opts, "grpc_servicename", params.Get("serviceName"))
+	case "http", "tcp":
+		if transport == "http" || strings.TrimSpace(params.Get("headerType")) == "http" {
+			setNodeOptionList(opts, "http_host", splitCommaValues(decodeShareComponent(params.Get("host"))))
+			setNodeOption(opts, "http_path", decodeShareComponent(params.Get("path")))
+		}
+	case "httpupgrade":
+		setNodeOption(opts, "httpupgrade_host", decodeShareComponent(params.Get("host")))
+		setNodeOption(opts, "http_path", decodeShareComponent(params.Get("path")))
+	case "ws":
+		setNodeOption(opts, "ws_host", decodeShareComponent(params.Get("host")))
+		path := decodeShareComponent(params.Get("path"))
+		if strings.Contains(path, "?ed=") {
+			parts := strings.SplitN(path, "?ed=", 2)
+			setNodeOption(opts, "websocket_early_data_header", "Sec-WebSocket-Protocol")
+			setNodeOption(opts, "websocket_early_data", parts[1])
+			path = parts[0]
+		}
+		setNodeOption(opts, "ws_path", path)
+	}
+	return opts, nil
+}
+
+func parseVMessShareLink(raw string) (map[string]interface{}, error) {
+	payload := strings.TrimSpace(strings.TrimPrefix(raw, "vmess://"))
+	if payload == "" {
+		return nil, fmt.Errorf("invalid vmess link")
+	}
+	if strings.Contains(payload, "&") {
+		return nil, fmt.Errorf("unsupported vmess format")
+	}
+	if idx := strings.Index(payload, "#"); idx >= 0 {
+		payload = payload[:idx]
+	}
+
+	decoded, err := decodeBase64Loose(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode vmess failed: %w", err)
+	}
+	var vm map[string]interface{}
+	if err := json.Unmarshal([]byte(decoded), &vm); err != nil {
+		return nil, fmt.Errorf("parse vmess payload failed: %w", err)
+	}
+	if mapString(vm, "v") != "2" {
+		return nil, fmt.Errorf("unsupported vmess version")
+	}
+
+	netMode := strings.TrimSpace(mapString(vm, "net"))
+	if netMode == "kcp" {
+		return nil, fmt.Errorf("unsupported vmess transport: kcp")
+	}
+	if netMode == "quic" && strings.TrimSpace(mapString(vm, "type")) != "" && strings.TrimSpace(mapString(vm, "type")) != "none" {
+		return nil, fmt.Errorf("unsupported vmess quic mode")
+	}
+
+	opts := map[string]interface{}{
+		"type": "vmess",
+	}
+	setNodeOption(opts, "label", decodeShareComponent(mapString(vm, "ps")))
+	setNodeOption(opts, "address", mapString(vm, "add"))
+	setNodeOption(opts, "port", mapString(vm, "port"))
+	setNodeOption(opts, "uuid", mapString(vm, "id"))
+	setNodeOption(opts, "vmess_alterid", mapString(vm, "aid"))
+	setNodeOption(opts, "vmess_encrypt", firstNonEmptyValue(mapString(vm, "scy"), "auto"))
+	if netMode != "" && netMode != "tcp" {
+		setNodeOption(opts, "transport", netMode)
+	}
+	if strings.TrimSpace(mapString(vm, "tls")) == "tls" {
+		setNodeOption(opts, "tls", "1")
+	} else {
+		setNodeOption(opts, "tls", "0")
+	}
+	setNodeOption(opts, "tls_sni", firstNonEmptyValue(mapString(vm, "sni"), mapString(vm, "host")))
+	setNodeOptionList(opts, "tls_alpn", splitCommaValues(mapString(vm, "alpn")))
+	setNodeOption(opts, "tls_utls", mapString(vm, "fp"))
+
+	switch netMode {
+	case "grpc":
+		setNodeOption(opts, "grpc_servicename", mapString(vm, "path"))
+	case "h2", "tcp":
+		if netMode == "h2" || strings.TrimSpace(mapString(vm, "type")) == "http" {
+			setNodeOption(opts, "transport", "http")
+			setNodeOptionList(opts, "http_host", splitCommaValues(mapString(vm, "host")))
+			setNodeOption(opts, "http_path", mapString(vm, "path"))
+		}
+	case "httpupgrade":
+		setNodeOption(opts, "httpupgrade_host", mapString(vm, "host"))
+		setNodeOption(opts, "http_path", mapString(vm, "path"))
+	case "ws":
+		setNodeOption(opts, "ws_host", mapString(vm, "host"))
+		path := mapString(vm, "path")
+		if strings.Contains(path, "?ed=") {
+			parts := strings.SplitN(path, "?ed=", 2)
+			setNodeOption(opts, "websocket_early_data_header", "Sec-WebSocket-Protocol")
+			setNodeOption(opts, "websocket_early_data", parts[1])
+			path = parts[0]
+		}
+		setNodeOption(opts, "ws_path", path)
+	}
+
+	return opts, nil
+}
+
+func finalizeParsedShareNode(opts map[string]interface{}) (*parsedShareNode, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("empty parsed node")
+	}
+	address := strings.TrimSpace(asString(opts["address"]))
+	port := strings.TrimSpace(asString(opts["port"]))
+	address = strings.Trim(address, "[]")
+	if err := validateNodeAddressAndPort(address, port); err != nil {
+		return nil, err
+	}
+	opts["address"] = address
+	opts["port"] = port
+
+	label := strings.TrimSpace(asString(opts["label"]))
+	if label == "" {
+		if ip := net.ParseIP(address); ip != nil && strings.Contains(address, ":") {
+			label = "[" + address + "]:" + port
+		} else {
+			label = address + ":" + port
+		}
+	}
+	opts["label"] = label
+
+	clean := make(map[string]interface{}, len(opts))
+	for key, value := range opts {
+		switch typed := value.(type) {
+		case nil:
+			continue
+		case string:
+			typed = strings.TrimSpace(typed)
+			if typed == "" {
+				continue
+			}
+			clean[key] = typed
+		case []string:
+			normalized := compactStringValues(typed, 128)
+			if len(normalized) == 0 {
+				continue
+			}
+			clean[key] = normalized
+		default:
+			text := strings.TrimSpace(asString(typed))
+			if text == "" {
+				continue
+			}
+			clean[key] = text
+		}
+	}
+	return &parsedShareNode{Options: clean}, nil
+}
+
+func validateNodeAddressAndPort(address string, port string) error {
+	if strings.TrimSpace(address) == "" {
+		return fmt.Errorf("share link address is empty")
+	}
+	portInt, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || portInt <= 0 || portInt > 65535 {
+		return fmt.Errorf("share link has invalid port: %q", port)
+	}
+	return nil
+}
+
+func sectionLabel(section uciSection) string {
+	label := strings.TrimSpace(section.Options["label"])
+	if label == "" {
+		label = section.Name
+	}
+	return label
+}
+
+func sectionMapByName(sections []uciSection) map[string]uciSection {
+	out := make(map[string]uciSection, len(sections))
+	for _, section := range sections {
+		out[section.Name] = section
+	}
+	return out
+}
+
+func findSectionByTypeAndName(sections []uciSection, sectionType string, name string) (uciSection, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return uciSection{}, false
+	}
+	for _, section := range sections {
+		if section.Type == sectionType && section.Name == name {
+			return section, true
+		}
+	}
+	return uciSection{}, false
+}
+
+func findSectionByTypeAndLabel(sections []uciSection, sectionType string, label string) (string, error) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "", errors.New("empty section label")
+	}
+	matches := make([]string, 0, 2)
+	for _, section := range sections {
+		if section.Type != sectionType {
+			continue
+		}
+		if sectionLabel(section) == label {
+			matches = append(matches, section.Name)
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("section %q not found", label)
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("section label %q is ambiguous", label)
+	}
+	return matches[0], nil
+}
+
+func routingNodeTagToID(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "cfg-") && strings.HasSuffix(value, "-out") && len(value) > len("cfg--out") {
+		return strings.TrimSuffix(strings.TrimPrefix(value, "cfg-"), "-out")
+	}
+	return value
+}
+
+func resolveRoutingNodeIDRef(value string, sections []uciSection) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("empty routing node reference")
+	}
+	lower := strings.ToLower(value)
+	switch lower {
+	case "direct", "direct-out", "block", "block-out":
+		return lower, nil
+	}
+
+	candidate := routingNodeTagToID(value)
+	if section, ok := findSectionByTypeAndName(sections, "routing_node", candidate); ok {
+		return section.Name, nil
+	}
+	if candidate != value {
+		if _, ok := findSectionByTypeAndName(sections, "node", candidate); ok {
+			return "", fmt.Errorf("outbound tag %q points to node section, not routing node", value)
+		}
+	}
+	if sectionID, err := findSectionByTypeAndLabel(sections, "routing_node", value); err == nil {
+		return sectionID, nil
+	}
+	return "", fmt.Errorf("routing node %q not found", value)
+}
+
+func resolveRoutingNodeOutboundOption(value string, sections []uciSection) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	switch strings.ToLower(value) {
+	case "direct", "direct-out":
+		return "", nil
+	case "block", "block-out":
+		return "block-out", nil
+	}
+	routingID, err := resolveRoutingNodeIDRef(value, sections)
+	if err != nil {
+		return "", err
+	}
+	switch routingID {
+	case "direct", "direct-out":
+		return "", nil
+	case "block", "block-out":
+		return "block-out", nil
+	default:
+		return routingID, nil
+	}
+}
+
+func resolveRuleSetOutboundOption(value string, sections []uciSection) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	switch strings.ToLower(value) {
+	case "direct", "direct-out":
+		return "direct-out", nil
+	case "block", "block-out":
+		return "block-out", nil
+	}
+	routingID, err := resolveRoutingNodeIDRef(value, sections)
+	if err != nil {
+		return "", err
+	}
+	switch routingID {
+	case "direct":
+		return "direct-out", nil
+	case "direct-out":
+		return "direct-out", nil
+	case "block", "block-out":
+		return "block-out", nil
+	default:
+		return routingID, nil
+	}
+}
+
+func resolveNodeIDRef(id string, tag string, sections []uciSection) (string, error) {
+	raw := firstNonEmptyValue(id, tag)
+	if raw == "" {
+		return "", fmt.Errorf("missing node id/tag")
+	}
+
+	raw = routingNodeTagToID(raw)
+	if section, ok := findSectionByTypeAndName(sections, "node", raw); ok {
+		return section.Name, nil
+	}
+	if section, ok := findSectionByTypeAndName(sections, "routing_node", raw); ok {
+		nodeID := strings.TrimSpace(section.Options["node"])
+		if nodeID == "" || nodeID == "urltest" {
+			return "", fmt.Errorf("routing node %q has no underlying node", section.Name)
+		}
+		if _, ok := findSectionByTypeAndName(sections, "node", nodeID); !ok {
+			return "", fmt.Errorf("node %q not found", nodeID)
+		}
+		return nodeID, nil
+	}
+
+	if sectionID, err := findSectionByTypeAndLabel(sections, "node", firstNonEmptyValue(id, tag)); err == nil {
+		return sectionID, nil
+	}
+	if routingID, err := findSectionByTypeAndLabel(sections, "routing_node", firstNonEmptyValue(id, tag)); err == nil {
+		if routingSection, ok := findSectionByTypeAndName(sections, "routing_node", routingID); ok {
+			nodeID := strings.TrimSpace(routingSection.Options["node"])
+			if _, ok := findSectionByTypeAndName(sections, "node", nodeID); ok {
+				return nodeID, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("node %q not found", firstNonEmptyValue(id, tag))
+}
+
+func applyNodeOptions(sectionID string, options map[string]interface{}) error {
+	for key, value := range options {
+		switch typed := value.(type) {
+		case string:
+			if err := setOrDeleteUCIOption(sectionID, key, typed); err != nil {
+				return err
+			}
+		case []string:
+			if err := applyUCIListOption(sectionID, key, typed); err != nil {
+				return err
+			}
+		default:
+			asText := asString(typed)
+			if err := setOrDeleteUCIOption(sectionID, key, asText); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func allocateSectionID(preferred string, fallbackPrefix string) (string, error) {
+	base := sanitizeUCIIdentifier(preferred)
+	if base == "" {
+		base = sanitizeUCIIdentifier(fallbackPrefix + "_" + md5Hex(strconv.FormatInt(time.Now().UnixNano(), 10))[:8])
+	}
+	if base == "" {
+		base = fallbackPrefix + "_1"
+	}
+
+	candidate := base
+	for i := 0; i < 2048; i++ {
+		if _, err := getUCISectionType(candidate); err != nil {
+			return candidate, nil
+		}
+		candidate = fmt.Sprintf("%s_%d", base, i+1)
+	}
+	return "", fmt.Errorf("failed to allocate free section id for %q", preferred)
+}
+
+func loadSubscriptionDefaults(sections []uciSection) subscriptionDefaults {
+	out := subscriptionDefaults{
+		AllowInsecure:  false,
+		PacketEncoding: "",
+	}
+	for _, section := range sections {
+		if !(section.Type == "homeproxy" && section.Name == "subscription") && section.Type != "subscription" {
+			continue
+		}
+		out.AllowInsecure = strings.TrimSpace(section.Options["allow_insecure"]) == "1"
+		out.PacketEncoding = strings.TrimSpace(section.Options["packet_encoding"])
+		break
+	}
+	return out
+}
+
+func createNodeSection(nodeID string) error {
+	if nodeID == "" {
+		return fmt.Errorf("empty node id")
+	}
+	_, err := runCommandCombined("uci", "-q", "set", "homeproxy."+nodeID+"=node")
+	if err != nil {
+		return fmt.Errorf("create node failed: %w", err)
+	}
+	return nil
+}
+
+func createRoutingNodeSection(routingID string) error {
+	if routingID == "" {
+		return fmt.Errorf("empty routing node id")
+	}
+	_, err := runCommandCombined("uci", "-q", "set", "homeproxy."+routingID+"=routing_node")
+	if err != nil {
+		return fmt.Errorf("create routing node failed: %w", err)
+	}
+	return nil
+}
+
+func createRuleSetSection(reqID string) (string, error) {
+	ruleSetID := routingSectionFromAnyTag(reqID)
+	ruleSetID = strings.TrimSpace(ruleSetID)
+	if ruleSetID != "" {
+		if strings.Contains(ruleSetID, " ") {
+			return "", fmt.Errorf("invalid ruleset id")
+		}
+		if _, err := getUCISectionType(ruleSetID); err == nil {
+			return "", fmt.Errorf("ruleset %q already exists", ruleSetID)
+		}
+		_, err := runCommandCombined("uci", "-q", "set", "homeproxy."+ruleSetID+"=ruleset")
+		if err != nil {
+			return "", fmt.Errorf("create ruleset failed: %w", err)
+		}
+		return ruleSetID, nil
+	}
+	out, err := runCommandCombined("uci", "-q", "add", "homeproxy", "ruleset")
+	if err != nil {
+		return "", fmt.Errorf("create ruleset failed: %w", err)
+	}
+	ruleSetID = strings.TrimSpace(out)
+	if ruleSetID == "" {
+		return "", fmt.Errorf("create ruleset failed: empty id")
+	}
+	return ruleSetID, nil
+}
+
+func ensureRuleSetSection(ruleSetID string) error {
+	sectionType, err := getUCISectionType(ruleSetID)
+	if err != nil {
+		return fmt.Errorf("ruleset %q not found: %w", ruleSetID, err)
+	}
+	if sectionType != "ruleset" {
+		return fmt.Errorf("%q is not a ruleset section", ruleSetID)
+	}
+	return nil
+}
+
+func validateRuleSetURL(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("ruleset url is required")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("invalid ruleset url: %w", err)
+	}
+	if strings.TrimSpace(parsed.Hostname()) == "" {
+		return fmt.Errorf("invalid ruleset url hostname")
+	}
+	return nil
+}
+
+func validateRuleSetFormat(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = "binary"
+	}
+	switch value {
+	case "binary", "source":
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported ruleset format: %q", value)
+	}
+}
+
+func removeSetFromList(values []string, toRemove map[string]struct{}) ([]string, bool) {
+	if len(values) == 0 || len(toRemove) == 0 {
+		return values, false
+	}
+	out := make([]string, 0, len(values))
+	changed := false
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := toRemove[value]; ok {
+			changed = true
+			continue
+		}
+		out = append(out, value)
+	}
+	return compactStringValues(out, 1024), changed
+}
+
+func removeRuleSetReferences(ruleSetID string, sections []uciSection) (int, error) {
+	remove := map[string]struct{}{ruleSetID: {}}
+	updated := 0
+	for _, section := range sections {
+		if section.Type != "routing_rule" && section.Type != "dns_rule" {
+			continue
+		}
+		current := sectionListValue(section, "rule_set")
+		next, changed := removeSetFromList(current, remove)
+		if !changed {
+			continue
+		}
+		if err := applyUCIListOption(section.Name, "rule_set", next); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 func listRuleSetMeta(sections []uciSection) map[string]ruleSetRef {
 	meta := make(map[string]ruleSetRef)
 	for _, section := range sections {
@@ -1164,6 +2309,14 @@ func (s *matchService) handleRoutingNodesList(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	nodeLabels := make(map[string]string)
+	for _, section := range sections {
+		if section.Type != "node" {
+			continue
+		}
+		nodeLabels[section.Name] = sectionLabel(section)
+	}
+
 	nodes := make([]routingNodeView, 0)
 	for _, section := range sections {
 		if section.Type != "routing_node" {
@@ -1173,11 +2326,17 @@ func (s *matchService) handleRoutingNodesList(w http.ResponseWriter, r *http.Req
 		if name == "" {
 			name = section.Name
 		}
+		nodeID := strings.TrimSpace(section.Options["node"])
+		nodeName := strings.TrimSpace(nodeLabels[nodeID])
+		if nodeName == "" && nodeID != "" {
+			nodeName = nodeID
+		}
 		nodes = append(nodes, routingNodeView{
 			ID:          section.Name,
 			Name:        name,
 			Enabled:     strings.TrimSpace(section.Options["enabled"]) != "0",
-			Node:        strings.TrimSpace(section.Options["node"]),
+			Node:        nodeID,
+			NodeName:    nodeName,
 			Tag:         "cfg-" + section.Name + "-out",
 			OutboundTag: routingNodeOutboundTagFromSection(section),
 		})
@@ -1186,6 +2345,627 @@ func (s *matchService) handleRoutingNodesList(w http.ResponseWriter, r *http.Req
 	resp := routingNodesListResponse{
 		ConfigPath: homeproxyUCIConfigPath,
 		Nodes:      nodes,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleNodesCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req nodeCreateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	link := firstNonEmptyValue(req.Link, req.Key)
+	if link == "" {
+		http.Error(w, "missing share link", http.StatusBadRequest)
+		return
+	}
+	routingName := strings.TrimSpace(req.Name)
+	if routingName == "" {
+		http.Error(w, "missing routing node name", http.StatusBadRequest)
+		return
+	}
+
+	parsed, err := parseShareLink(link)
+	if err != nil {
+		http.Error(w, "parse link failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	subscription := loadSubscriptionDefaults(sections)
+
+	nodeOptions := make(map[string]interface{}, len(parsed.Options)+2)
+	for key, value := range parsed.Options {
+		nodeOptions[key] = value
+	}
+	nodeLabel := firstNonEmptyValue(req.NodeLabel, asString(nodeOptions["label"]))
+	if nodeLabel == "" {
+		nodeLabel = routingName
+	}
+	nodeOptions["label"] = nodeLabel
+
+	nodeType := strings.ToLower(strings.TrimSpace(asString(nodeOptions["type"])))
+	if subscription.AllowInsecure && strings.TrimSpace(asString(nodeOptions["tls"])) == "1" && strings.TrimSpace(asString(nodeOptions["tls_insecure"])) == "" {
+		nodeOptions["tls_insecure"] = "1"
+	}
+	if (nodeType == "vless" || nodeType == "vmess") && strings.TrimSpace(asString(nodeOptions["packet_encoding"])) == "" {
+		nodeOptions["packet_encoding"] = firstNonEmptyValue(subscription.PacketEncoding, "xudp")
+	}
+
+	preferredNodeID := firstNonEmptyValue(req.NodeID, req.ID)
+	if preferredNodeID == "" {
+		preferredNodeID = md5Hex(nodeLabel)
+	}
+	nodeID, err := allocateSectionID(preferredNodeID, "node")
+	if err != nil {
+		http.Error(w, "create node failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := createNodeSection(nodeID); err != nil {
+		http.Error(w, "create node failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := applyNodeOptions(nodeID, nodeOptions); err != nil {
+		http.Error(w, "create node failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	preferredRoutingID := firstNonEmptyValue(req.RoutingID, sanitizeUCIIdentifier(routingName))
+	routingID, err := allocateSectionID(preferredRoutingID, "routing_node")
+	if err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := createRoutingNodeSection(routingID); err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setUCIOption(routingID, "label", routingName); err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := setUCIOption(routingID, "enabled", "1"); err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := setUCIOption(routingID, "node", nodeID); err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	routingOutbound, err := resolveRoutingNodeOutboundOption(req.Outbound, sections)
+	if err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := setOrDeleteUCIOption(routingID, "outbound", routingOutbound); err != nil {
+		http.Error(w, "create routing node failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "create node failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := nodeCreateResponse{
+		Created:         true,
+		NodeID:          nodeID,
+		NodeTag:         "cfg-" + nodeID + "-out",
+		NodeName:        nodeLabel,
+		RoutingID:       routingID,
+		RoutingTag:      "cfg-" + routingID + "-out",
+		RoutingName:     routingName,
+		RoutingOutbound: firstNonEmptyValue(routingOutbound, "direct"),
+		CreatedAt:       time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleNodesDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req nodeDeleteRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	nodeID, err := resolveNodeIDRef(req.ID, req.Tag, sections)
+	if err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	removedRoutingIDs := make([]string, 0)
+	removedRoutingSet := make(map[string]struct{})
+	for _, section := range sections {
+		if section.Type != "routing_node" {
+			continue
+		}
+		if strings.TrimSpace(section.Options["node"]) != nodeID {
+			continue
+		}
+		removedRoutingIDs = append(removedRoutingIDs, section.Name)
+		removedRoutingSet[section.Name] = struct{}{}
+	}
+
+	updatedRules := 0
+	updatedRuleSets := 0
+	for _, section := range sections {
+		switch section.Type {
+		case "routing_node":
+			if _, removed := removedRoutingSet[section.Name]; removed {
+				continue
+			}
+			outbound := strings.TrimSpace(section.Options["outbound"])
+			if outbound == "" {
+				continue
+			}
+			if _, removed := removedRoutingSet[outbound]; removed {
+				if err := deleteUCIOption(section.Name, "outbound"); err != nil {
+					http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+		case "routing_rule":
+			outbound := strings.TrimSpace(section.Options["outbound"])
+			if _, removed := removedRoutingSet[outbound]; !removed {
+				continue
+			}
+			action := strings.TrimSpace(section.Options["action"])
+			if action == "reject" {
+				if err := deleteUCIOption(section.Name, "outbound"); err != nil {
+					http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			} else {
+				if err := setUCIOption(section.Name, "action", "route"); err != nil {
+					http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := setUCIOption(section.Name, "outbound", "direct-out"); err != nil {
+					http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			updatedRules++
+		case "ruleset":
+			outbound := strings.TrimSpace(section.Options["outbound"])
+			if _, removed := removedRoutingSet[outbound]; !removed {
+				continue
+			}
+			if err := deleteUCIOption(section.Name, "outbound"); err != nil {
+				http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			updatedRuleSets++
+		}
+	}
+
+	for _, routingID := range removedRoutingIDs {
+		if _, err := runCommandCombined("uci", "-q", "delete", "homeproxy."+routingID); err != nil {
+			http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := deleteUCIOption("config", "main_node"); err == nil {
+		_ = deleteUCIOption("config", "main_udp_node")
+	}
+	if _, err := runCommandCombined("uci", "-q", "delete", "homeproxy."+nodeID); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := nodeDeleteResponse{
+		Deleted:           true,
+		NodeID:            nodeID,
+		NodeTag:           "cfg-" + nodeID + "-out",
+		RemovedRoutingIDs: removedRoutingIDs,
+		UpdatedRules:      updatedRules,
+		UpdatedRuleSets:   updatedRuleSets,
+		DeletedAt:         time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleNodesRename(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req nodeRenameRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	newName := strings.TrimSpace(req.Name)
+	if newName == "" {
+		http.Error(w, "missing new name", http.StatusBadRequest)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	nodeID, err := resolveNodeIDRef(req.ID, req.Tag, sections)
+	if err != nil {
+		http.Error(w, "rename failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, ok := findSectionByTypeAndName(sections, "node", nodeID); !ok {
+		http.Error(w, "rename failed: node not found", http.StatusBadRequest)
+		return
+	}
+
+	if err := setUCIOption(nodeID, "label", newName); err != nil {
+		http.Error(w, "rename failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	updatedRouting := make([]string, 0)
+	for _, section := range sections {
+		if section.Type != "routing_node" {
+			continue
+		}
+		if strings.TrimSpace(section.Options["node"]) != nodeID {
+			continue
+		}
+		if err := setUCIOption(section.Name, "label", newName); err != nil {
+			http.Error(w, "rename failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		updatedRouting = append(updatedRouting, section.Name)
+	}
+
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "rename failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := nodeRenameResponse{
+		Updated:           true,
+		NodeID:            nodeID,
+		NodeTag:           "cfg-" + nodeID + "-out",
+		Name:              newName,
+		UpdatedRoutingIDs: updatedRouting,
+		UpdatedAt:         time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRuleSetsCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ruleSetCreateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	name := firstNonEmptyValue(req.Name, req.Label)
+	if strings.TrimSpace(name) == "" {
+		http.Error(w, "missing ruleset name", http.StatusBadRequest)
+		return
+	}
+	if err := validateRuleSetURL(req.URL); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	format, err := validateRuleSetFormat(req.Format)
+	if err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	outbound, err := resolveRuleSetOutboundOption(req.Outbound, sections)
+	if err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rulesetIDSeed := firstNonEmptyValue(req.ID, req.Tag, sanitizeUCIIdentifier(name))
+	ruleSetID, err := createRuleSetSection(rulesetIDSeed)
+	if err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	updateInterval := firstNonEmptyValue(req.UpdateInterval, req.UpdateIntervalUCI, "1d")
+	if err := setUCIOption(ruleSetID, "label", name); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setUCIOption(ruleSetID, "enabled", boolToUCIValue(enabled)); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setUCIOption(ruleSetID, "type", "remote"); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setUCIOption(ruleSetID, "format", format); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setUCIOption(ruleSetID, "url", strings.TrimSpace(req.URL)); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setOrDeleteUCIOption(ruleSetID, "outbound", outbound); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := setOrDeleteUCIOption(ruleSetID, "update_interval", updateInterval); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "create failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := ruleSetCreateResponse{
+		Created:   true,
+		ID:        ruleSetID,
+		Tag:       routingRuleTag(ruleSetID),
+		CreatedAt: time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRuleSetsUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ruleSetUpdateRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ruleSetID := routingSectionFromAnyTag(firstNonEmptyValue(req.ID, req.Tag))
+	if ruleSetID == "" {
+		http.Error(w, "missing ruleset id/tag", http.StatusBadRequest)
+		return
+	}
+	if err := ensureRuleSetSection(ruleSetID); err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	changed := false
+	if req.Name != nil || req.Label != nil {
+		name := ""
+		if req.Name != nil {
+			name = strings.TrimSpace(*req.Name)
+		} else if req.Label != nil {
+			name = strings.TrimSpace(*req.Label)
+		}
+		if err := setOrDeleteUCIOption(ruleSetID, "label", name); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		changed = true
+	}
+	if req.Enabled != nil {
+		if err := setUCIOption(ruleSetID, "enabled", boolToUCIValue(*req.Enabled)); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		changed = true
+	}
+	if req.Format != nil {
+		format, formatErr := validateRuleSetFormat(*req.Format)
+		if formatErr != nil {
+			http.Error(w, "update failed: "+formatErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := setUCIOption(ruleSetID, "format", format); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		changed = true
+	}
+	if req.URL != nil {
+		if err := validateRuleSetURL(*req.URL); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := setUCIOption(ruleSetID, "url", strings.TrimSpace(*req.URL)); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		changed = true
+	}
+	if req.Outbound != nil {
+		outbound, outboundErr := resolveRuleSetOutboundOption(*req.Outbound, sections)
+		if outboundErr != nil {
+			http.Error(w, "update failed: "+outboundErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := setOrDeleteUCIOption(ruleSetID, "outbound", outbound); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		changed = true
+	}
+	updateIntervalPatch := req.UpdateInterval
+	if updateIntervalPatch == nil {
+		updateIntervalPatch = req.UpdateIntervalUCI
+	}
+	if updateIntervalPatch != nil {
+		if err := setOrDeleteUCIOption(ruleSetID, "update_interval", strings.TrimSpace(*updateIntervalPatch)); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		changed = true
+	}
+
+	if !changed {
+		http.Error(w, "no changes provided", http.StatusBadRequest)
+		return
+	}
+	if err := setUCIOption(ruleSetID, "type", "remote"); err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := ruleSetUpdateResponse{
+		Updated:   true,
+		ID:        ruleSetID,
+		Tag:       routingRuleTag(ruleSetID),
+		UpdatedAt: time.Now(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(resp)
+}
+
+func (s *matchService) handleRuleSetsDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ruleSetDeleteRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ruleSetID := routingSectionFromAnyTag(firstNonEmptyValue(req.ID, req.Tag))
+	if ruleSetID == "" {
+		http.Error(w, "missing ruleset id/tag", http.StatusBadRequest)
+		return
+	}
+	if err := ensureRuleSetSection(ruleSetID); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sections, err := parseUCISections(homeproxyUCIConfigPath)
+	if err != nil {
+		http.Error(w, "load failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	updatedRules, err := removeRuleSetReferences(ruleSetID, sections)
+	if err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := runCommandCombined("uci", "-q", "delete", "homeproxy."+ruleSetID); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := commitHomeproxyConfig(); err != nil {
+		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := ruleSetDeleteResponse{
+		Deleted:      true,
+		ID:           ruleSetID,
+		Tag:          routingRuleTag(ruleSetID),
+		UpdatedRules: updatedRules,
+		DeletedAt:    time.Now(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)

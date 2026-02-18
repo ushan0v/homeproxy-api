@@ -21,7 +21,13 @@
   - apply rule changes via sing-box hot reload: `POST /rules/hot-reload`
 - Routing metadata API:
   - list routing nodes: `GET /routing/nodes`
+  - create node from share link: `POST /nodes/create`
+  - rename node: `POST /nodes/rename`
+  - delete node: `POST /nodes/delete`
   - list rule sets: `GET /rulesets`
+  - create remote rule set: `POST /rulesets/create`
+  - update remote rule set: `POST /rulesets/update`
+  - delete rule set: `POST /rulesets/delete`
 - Network devices API:
   - list DHCP leases/devices: `GET /devices`
 - HomeProxy service API:
@@ -184,10 +190,49 @@ Deletes one `routing_rule` by `id` or `tag`.
 
 ### `GET /routing/nodes`
 
-Returns HomeProxy `routing_node` sections (id, display name, enabled state, source node, outbound tag).
+Returns HomeProxy `routing_node` sections (id, display name, enabled state, source node id, source node name from **Node Settings**, outbound tag).
 
 ```sh
 curl http://127.0.0.1:7878/routing/nodes
+```
+
+### `POST /nodes/create`
+
+Creates a new node from a share link (Import share links logic) and immediately creates a `routing_node`.
+
+```json
+{
+  "link": "vless://uuid@example.com:443?type=ws&security=tls#MyNode",
+  "name": "Proxy",
+  "outbound": "direct-out"
+}
+```
+
+Notes:
+
+- `link` (alias `key`) is required.
+- `name` is used as routing node display name.
+- `outbound` is optional (`direct` by default). Accepts `direct/direct-out` or routing node id/tag.
+
+### `POST /nodes/rename`
+
+Renames node label and linked routing node labels.
+
+```json
+{
+  "id": "a01700840f5780bdc234966ada16f49e",
+  "name": "New Name"
+}
+```
+
+### `POST /nodes/delete`
+
+Deletes node and related routing nodes. Also clears references in routing rules and rule sets.
+
+```json
+{
+  "id": "a01700840f5780bdc234966ada16f49e"
+}
 ```
 
 ### `GET /rulesets`
@@ -196,6 +241,46 @@ Returns HomeProxy `ruleset` sections (id/tag/name/type/format/url/path/update in
 
 ```sh
 curl http://127.0.0.1:7878/rulesets
+```
+
+### `POST /rulesets/create`
+
+Creates a remote rule set.
+
+```json
+{
+  "id": "my_remote_ruleset",
+  "name": "My Remote Ruleset",
+  "format": "binary",
+  "url": "https://example.com/ruleset.srs",
+  "outbound": "direct-out",
+  "updateInterval": "1d"
+}
+```
+
+### `POST /rulesets/update`
+
+Updates one remote rule set.
+
+```json
+{
+  "id": "my_remote_ruleset",
+  "name": "My Remote Ruleset v2",
+  "format": "source",
+  "url": "https://example.com/ruleset.json",
+  "outbound": "Proxy",
+  "updateInterval": "12h"
+}
+```
+
+### `POST /rulesets/delete`
+
+Deletes one rule set and removes it from routing/dns rule references.
+
+```json
+{
+  "id": "my_remote_ruleset"
+}
 ```
 
 ### `GET /devices`
