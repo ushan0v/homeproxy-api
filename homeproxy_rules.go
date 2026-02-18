@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 )
@@ -508,10 +507,6 @@ func (s *matchService) handleRulesList(w http.ResponseWriter, r *http.Request) {
 			Outbound: resolveRoutingOutbound(section.Options["action"], section.Options["outbound"], outboundLabels),
 		})
 	}
-
-	sort.Slice(rules, func(i, j int) bool {
-		return rules[i].Tag < rules[j].Tag
-	})
 
 	resp := rulesListResponse{
 		ConfigPath: homeproxyUCIConfigPath,

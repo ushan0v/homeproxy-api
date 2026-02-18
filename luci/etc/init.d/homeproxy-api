@@ -33,8 +33,6 @@ start_service() {
 
 	[ "$enabled" = '1' ] || return 0
 	[ -x "$bin" ] || return 0
-	[ -s "$cfg" ] || return 0
-	[ -e "$db" ] || return 0
 
 	case "$mode" in
 		eco|default) ;;

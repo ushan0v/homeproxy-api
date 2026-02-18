@@ -73,10 +73,11 @@ type matchState struct {
 	HomeproxyMTime time.Time
 	LocalFiles     []localFileStamp
 
-	RouteFinal   string
-	DefaultTag   string
-	OutboundType map[string]string
-	OutboundName map[string]string
+	RouteFinal        string
+	DefaultTag        string
+	OutboundType      map[string]string
+	OutboundName      map[string]string
+	RouteOutboundName map[string]string
 
 	RuleSetInfo map[string]option.RuleSet
 	RuleSets    []compiledRuleSet
@@ -275,8 +276,9 @@ func extractRuleNamesFromConfigJSON(content []byte) map[int]string {
 }
 
 type homeproxyMeta struct {
-	OutboundNameByTag map[string]string
-	RoutingRuleNames  []string
+	OutboundNameByTag      map[string]string
+	RouteOutboundNameByTag map[string]string
+	RoutingRuleNames       []string
 }
 
 func stripInlineComment(line string) string {
@@ -348,62 +350,75 @@ func parseOptionLine(line string) (key string, value string, ok bool) {
 	return key, value, true
 }
 
+func routingNodeOutboundTagFromSection(section uciSection) string {
+	node := strings.TrimSpace(section.Options["node"])
+	if node == "" {
+		return ""
+	}
+	switch strings.ToLower(node) {
+	case "direct", "direct-out":
+		return "direct-out"
+	case "block", "block-out", "reject", "reject-out":
+		return "block-out"
+	case "urltest":
+		return "cfg-" + section.Name + "-out"
+	default:
+		if strings.HasPrefix(node, "cfg-") && strings.HasSuffix(node, "-out") {
+			return node
+		}
+		return "cfg-" + node + "-out"
+	}
+}
+
 func loadHomeproxyMeta(path string) (*homeproxyMeta, error) {
-	content, err := os.ReadFile(path)
+	sections, err := parseUCISections(path)
 	if err != nil {
 		return nil, err
 	}
 	meta := &homeproxyMeta{
-		OutboundNameByTag: make(map[string]string),
+		OutboundNameByTag:      make(map[string]string),
+		RouteOutboundNameByTag: make(map[string]string),
 	}
 
-	currentType := ""
-	currentName := ""
-	currentLabel := ""
-	currentEnabled := ""
-	flush := func() {
-		if currentType == "" || currentName == "" {
-			return
-		}
-		if currentLabel != "" {
-			meta.OutboundNameByTag["cfg-"+currentName+"-out"] = currentLabel
-		}
-		if currentType == "routing_rule" {
-			enabled := strings.TrimSpace(currentEnabled)
+	for _, section := range sections {
+		label := strings.TrimSpace(section.Options["label"])
+		switch section.Type {
+		case "node":
+			if label == "" {
+				label = section.Name
+			}
+			if label != "" {
+				meta.OutboundNameByTag["cfg-"+section.Name+"-out"] = label
+			}
+		case "routing_node":
+			if strings.TrimSpace(section.Options["enabled"]) == "0" {
+				continue
+			}
+			outboundTag := routingNodeOutboundTagFromSection(section)
+			if outboundTag == "" {
+				continue
+			}
+			routeName := label
+			if routeName == "" {
+				routeName = section.Name
+			}
+			if routeName == "" {
+				continue
+			}
+			meta.RouteOutboundNameByTag[outboundTag] = routeName
+		case "routing_rule":
+			enabled := strings.TrimSpace(section.Options["enabled"])
 			if enabled == "" || enabled == "1" {
-				ruleName := currentLabel
+				ruleName := label
 				if ruleName == "" {
-					ruleName = currentName
+					ruleName = section.Name
 				}
-				meta.RoutingRuleNames = append(meta.RoutingRuleNames, ruleName)
+				if ruleName != "" {
+					meta.RoutingRuleNames = append(meta.RoutingRuleNames, ruleName)
+				}
 			}
 		}
 	}
-
-	lines := strings.Split(string(content), "\n")
-	for _, raw := range lines {
-		line := stripInlineComment(strings.TrimSpace(raw))
-		if line == "" {
-			continue
-		}
-		if st, sn, ok := parseConfigLine(line); ok {
-			flush()
-			currentType = st
-			currentName = sn
-			currentLabel = ""
-			currentEnabled = ""
-			continue
-		}
-		if key, value, ok := parseOptionLine(line); ok {
-			switch key {
-			case "label":
-				currentLabel = value
-			case "enabled":
-				currentEnabled = value
-			}
-		}
-	}
-	flush()
 	return meta, nil
 }
 
@@ -701,6 +716,7 @@ func (s *matchService) buildState(configSt os.FileInfo, dbSt os.FileInfo) (*matc
 		"block":      "block",
 		"block-out":  "block",
 	}
+	routeOutboundNames := map[string]string{}
 	for _, ob := range cfg.Outbounds {
 		if ob.Tag == "" {
 			continue
@@ -729,6 +745,13 @@ func (s *matchService) buildState(configSt os.FileInfo, dbSt os.FileInfo) (*matc
 				continue
 			}
 			outboundNames[tag] = name
+		}
+		for tag, name := range hpMeta.RouteOutboundNameByTag {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			routeOutboundNames[tag] = name
 		}
 		uciRuleNames = hpMeta.RoutingRuleNames
 	}
@@ -781,10 +804,11 @@ func (s *matchService) buildState(configSt os.FileInfo, dbSt os.FileInfo) (*matc
 		HomeproxyPath: homeproxyPath,
 		LocalFiles:    localFiles,
 
-		RouteFinal:   cfg.Route.Final,
-		DefaultTag:   outboundManager.defaultTag,
-		OutboundType: outboundType,
-		OutboundName: outboundNames,
+		RouteFinal:        cfg.Route.Final,
+		DefaultTag:        outboundManager.defaultTag,
+		OutboundType:      outboundType,
+		OutboundName:      outboundNames,
+		RouteOutboundName: routeOutboundNames,
 
 		RuleSetInfo: ruleSetInfo,
 		RuleSets:    ruleSets,
@@ -849,6 +873,9 @@ func (s *matchService) getStateForRequest() (*matchState, func(), error) {
 		return state, func() { closeMatchState(state) }, nil
 	}
 	if err := s.reloadIfNeeded(); err != nil {
+		if state := s.state.Load(); state != nil && errors.Is(err, os.ErrNotExist) {
+			return state, func() {}, nil
+		}
 		return nil, nil, err
 	}
 	state := s.state.Load()
@@ -1144,6 +1171,15 @@ func outboundDisplayName(state *matchState, outboundTag string) string {
 	return normalizeOutboundName(outboundTag)
 }
 
+func routeOutboundDisplayName(state *matchState, outboundTag string) string {
+	if state != nil {
+		if name := strings.TrimSpace(state.RouteOutboundName[outboundTag]); name != "" {
+			return name
+		}
+	}
+	return outboundDisplayName(state, outboundTag)
+}
+
 func (s *matchService) evaluateOne(state *matchState, input string, inbound string, network string, port uint16) checkResult {
 	res := checkResult{
 		Input:     input,
@@ -1225,8 +1261,12 @@ func (s *matchService) evaluateOne(state *matchState, input string, inbound stri
 			res.Outbound = outboundDisplayName(state, "block-out")
 		case *routeRule.RuleActionRoute:
 			res.OutboundTag = a.Outbound
-			res.Outbound = outboundDisplayName(state, a.Outbound)
 			res.Class = classifyOutbound(state, a.Outbound)
+			if res.Class == "proxy" {
+				res.Outbound = routeOutboundDisplayName(state, a.Outbound)
+			} else {
+				res.Outbound = outboundDisplayName(state, a.Outbound)
+			}
 		case *routeRule.RuleActionDirect:
 			res.OutboundTag = "direct"
 			res.Outbound = outboundDisplayName(state, "direct")
@@ -1468,7 +1508,7 @@ func (s *matchService) serve(listen string) error {
 	}
 	if !s.ecoMode {
 		if err := s.reloadIfNeeded(); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "initial state load skipped: %v\n", err)
 		}
 	}
 
