@@ -15,8 +15,15 @@
 - Health check: `GET /healthz`
 - Routing rules API:
   - list rules: `GET /rules`
+  - create rule: `POST /rules/create`
+  - delete rule: `POST /rules/delete`
   - update one rule config (UCI only, no apply): `POST /rules/update`
   - apply rule changes via sing-box hot reload: `POST /rules/hot-reload`
+- Routing metadata API:
+  - list routing nodes: `GET /routing/nodes`
+  - list rule sets: `GET /rulesets`
+- Network devices API:
+  - list DHCP leases/devices: `GET /devices`
 - HomeProxy service API:
   - status: `GET /homeproxy/status`
   - start: `POST /homeproxy/start`
@@ -80,7 +87,7 @@ curl "http://127.0.0.1:7878/stats"
 
 ### `GET /rules`
 
-Returns all HomeProxy `routing_rule` sections with:
+Returns all HomeProxy `routing_rule` sections in **priority order** (top-to-bottom as in LuCI) with:
 
 - internal id: section name (`id`)
 - generated rule tag (`tag` => `cfg-<id>-rule`)
@@ -109,13 +116,18 @@ curl http://127.0.0.1:7878/rules
 
 ### `POST /rules/update`
 
-Updates only configurable arrays of one routing rule, commits to UCI, but does **not** apply runtime changes.
+Updates one routing rule in UCI (name, outbound, and/or list fields), but does **not** apply runtime changes.
 
 Request:
 
 ```json
 {
   "tag": "cfg-abc123-rule",
+  "name": "My rule name",
+  "outbound": {
+    "class": "proxy",
+    "node": "Proxy"
+  },
   "config": {
     "ruleSet": ["my_ruleset_1", "my_ruleset_2"],
     "domain": ["example.com"],
@@ -136,7 +148,63 @@ Notes:
 
 - `tag` may be either generated rule tag (`cfg-...-rule`) or raw section id.
 - snake_case aliases are also accepted (for example `rule_set`, `source_ip_cidr`, `port_range`).
-- only listed arrays are replaced.
+- `name` (or alias `label`) updates rule display name.
+- `outbound.class` supports `direct`, `block`, `proxy`.
+- for `proxy`, set `outbound.node` to routing node section id (for example `Proxy`).
+- only list fields explicitly present in `config` are replaced.
+
+### `POST /rules/create`
+
+Creates a new `routing_rule` section.
+
+```json
+{
+  "id": "api_rule_1",
+  "name": "API rule",
+  "enabled": true,
+  "outbound": {
+    "class": "direct"
+  },
+  "config": {
+    "domain": ["example.com"],
+    "ruleSet": ["ads"]
+  }
+}
+```
+
+### `POST /rules/delete`
+
+Deletes one `routing_rule` by `id` or `tag`.
+
+```json
+{
+  "id": "api_rule_1"
+}
+```
+
+### `GET /routing/nodes`
+
+Returns HomeProxy `routing_node` sections (id, display name, enabled state, source node, outbound tag).
+
+```sh
+curl http://127.0.0.1:7878/routing/nodes
+```
+
+### `GET /rulesets`
+
+Returns HomeProxy `ruleset` sections (id/tag/name/type/format/url/path/update interval).
+
+```sh
+curl http://127.0.0.1:7878/rulesets
+```
+
+### `GET /devices`
+
+Returns devices from router DHCP leases (`/tmp/dhcp.leases`) with hostname, local IP, MAC, client id and lease expiry.
+
+```sh
+curl http://127.0.0.1:7878/devices
+```
 
 ### `POST /rules/hot-reload`
 
