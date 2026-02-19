@@ -3160,6 +3160,20 @@ func runHomeproxyAction(action string) error {
 		}
 	}
 
+	// Some OpenWrt init scripts return non-zero even when the target state was reached.
+	if running, _, statusErr := queryHomeproxyStatus(); statusErr == nil {
+		switch action {
+		case "stop":
+			if !running {
+				return nil
+			}
+		case "start", "restart":
+			if running {
+				return nil
+			}
+		}
+	}
+
 	if text == "" {
 		return err
 	}
