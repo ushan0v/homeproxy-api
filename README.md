@@ -321,6 +321,18 @@ curl -X POST http://127.0.0.1:7878/homeproxy/stop
 curl -X POST http://127.0.0.1:7878/homeproxy/restart
 ```
 
+Optional async mode for action endpoints:
+
+```sh
+curl -X POST "http://127.0.0.1:7878/homeproxy/stop?async=1"
+```
+
+Notes:
+
+- with `async=1`, API returns `202 Accepted` immediately and reports `"status": "pending"` while action runs in background
+- synchronous mode stays default
+- `POST /homeproxy/stop` now short-circuits when HomeProxy is already inactive (no expensive init script run)
+
 ## LuCI
 
 Menu: `Services -> HomeProxy API`

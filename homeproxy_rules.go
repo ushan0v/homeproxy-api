@@ -176,6 +176,8 @@ type homeproxyServiceStatusResponse struct {
 type homeproxyServiceActionResponse struct {
 	Action    string    `json:"action"`
 	OK        bool      `json:"ok"`
+	Async     bool      `json:"async,omitempty"`
+	Accepted  bool      `json:"accepted,omitempty"`
 	Running   bool      `json:"running"`
 	Status    string    `json:"status"`
 	CheckedAt time.Time `json:"checkedAt"`
@@ -3133,6 +3135,20 @@ func runHomeproxyAction(action string) error {
 		return fmt.Errorf("unsupported action: %s", action)
 	}
 
+	// Avoid expensive init script work when the requested state is already reached.
+	if running, _, statusErr := queryHomeproxyStatus(); statusErr == nil {
+		switch action {
+		case "stop":
+			if !running {
+				return nil
+			}
+		case "start":
+			if running {
+				return nil
+			}
+		}
+	}
+
 	cmd := exec.Command("/etc/init.d/homeproxy", action)
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
@@ -3180,6 +3196,25 @@ func runHomeproxyAction(action string) error {
 	return fmt.Errorf("%w: %s", err, text)
 }
 
+func parseBoolQueryValue(raw string) (bool, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, false
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return parsed, true
+}
+
+func requestWantsAsyncServiceAction(r *http.Request) bool {
+	if v, ok := parseBoolQueryValue(r.URL.Query().Get("async")); ok {
+		return v
+	}
+	return false
+}
+
 func (s *matchService) handleHomeproxyStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuth(w, r) {
 		return
@@ -3210,6 +3245,28 @@ func (s *matchService) handleHomeproxyAction(action string, w http.ResponseWrite
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if requestWantsAsyncServiceAction(r) {
+		go func() {
+			if err := runHomeproxyAction(action); err != nil {
+				fmt.Fprintf(os.Stderr, "homeproxy async action %q failed: %v\n", action, err)
+			}
+		}()
+		resp := homeproxyServiceActionResponse{
+			Action:    action,
+			OK:        true,
+			Async:     true,
+			Accepted:  true,
+			Running:   false,
+			Status:    "pending",
+			CheckedAt: time.Now(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(resp)
 		return
 	}
 	if err := runHomeproxyAction(action); err != nil {
