@@ -68,6 +68,7 @@ type routingRuleView struct {
 	Tag      string           `json:"tag"`
 	Name     string           `json:"name"`
 	Enabled  bool             `json:"enabled"`
+	Priority int              `json:"priority"`
 	RuleSet  []ruleSetRef     `json:"ruleSet"`
 	HostIP   ruleHostIPConfig `json:"hostIp"`
 	Port     rulePortConfig   `json:"port"`
@@ -115,6 +116,8 @@ type rulesUpdateRequest struct {
 	ID       string               `json:"id,omitempty"`
 	Name     *string              `json:"name,omitempty"`
 	Label    *string              `json:"label,omitempty"`
+	Enabled  *bool                `json:"enabled,omitempty"`
+	Priority *int                 `json:"priority,omitempty"`
 	Outbound *rulesUpdateOutbound `json:"outbound,omitempty"`
 	Config   rulesUpdatePayload   `json:"config"`
 }
@@ -133,6 +136,7 @@ type rulesCreateRequest struct {
 	Name     *string              `json:"name,omitempty"`
 	Label    *string              `json:"label,omitempty"`
 	Enabled  *bool                `json:"enabled,omitempty"`
+	Priority *int                 `json:"priority,omitempty"`
 	Outbound *rulesUpdateOutbound `json:"outbound,omitempty"`
 	Config   rulesUpdatePayload   `json:"config"`
 }
@@ -632,6 +636,120 @@ func ensureRoutingRuleSection(ruleID string) error {
 		return fmt.Errorf("%q is not a routing_rule section", ruleID)
 	}
 	return nil
+}
+
+type runtimeSectionInfo struct {
+	Name string
+	Type string
+}
+
+func listRuntimeSections() ([]runtimeSectionInfo, error) {
+	out, err := runCommandCombined("uci", "-q", "show", "homeproxy")
+	if err != nil {
+		return nil, err
+	}
+	sections := make([]runtimeSectionInfo, 0)
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || !strings.HasPrefix(line, "homeproxy.") {
+			continue
+		}
+		eqIndex := strings.Index(line, "=")
+		if eqIndex <= len("homeproxy.") {
+			continue
+		}
+		left := strings.TrimSpace(line[len("homeproxy."):eqIndex])
+		right := strings.Trim(strings.TrimSpace(line[eqIndex+1:]), "'\"")
+		if strings.Contains(left, ".") {
+			continue
+		}
+		sections = append(sections, runtimeSectionInfo{
+			Name: left,
+			Type: right,
+		})
+	}
+	return sections, nil
+}
+
+func normalizeRulePriority(priority int, total int) (int, error) {
+	if priority < 0 {
+		return 0, fmt.Errorf("priority must be >= 0")
+	}
+	if total <= 0 {
+		return 0, fmt.Errorf("no routing rules found")
+	}
+	if priority >= total {
+		return total - 1, nil
+	}
+	return priority, nil
+}
+
+func setRoutingRulePriority(ruleID string, priority int) (bool, error) {
+	sections, err := listRuntimeSections()
+	if err != nil {
+		return false, fmt.Errorf("load rules failed: %w", err)
+	}
+
+	routingRuleIDs := make([]string, 0)
+	for _, section := range sections {
+		if section.Type == "routing_rule" {
+			routingRuleIDs = append(routingRuleIDs, section.Name)
+		}
+	}
+
+	currentPriority := -1
+	for index, id := range routingRuleIDs {
+		if id == ruleID {
+			currentPriority = index
+			break
+		}
+	}
+	if currentPriority < 0 {
+		return false, fmt.Errorf("rule %q not found in routing_rule list", ruleID)
+	}
+
+	targetPriority, err := normalizeRulePriority(priority, len(routingRuleIDs))
+	if err != nil {
+		return false, err
+	}
+	if targetPriority == currentPriority {
+		return false, nil
+	}
+
+	sectionsWithoutCurrent := make([]runtimeSectionInfo, 0, len(sections)-1)
+	for _, section := range sections {
+		if section.Name == ruleID {
+			continue
+		}
+		sectionsWithoutCurrent = append(sectionsWithoutCurrent, section)
+	}
+
+	remainingRoutingPositions := make([]int, 0)
+	for index, section := range sectionsWithoutCurrent {
+		if section.Type == "routing_rule" {
+			remainingRoutingPositions = append(remainingRoutingPositions, index)
+		}
+	}
+
+	targetAfterRemove := targetPriority
+	if targetAfterRemove > len(remainingRoutingPositions) {
+		targetAfterRemove = len(remainingRoutingPositions)
+	}
+
+	targetSectionIndex := len(sectionsWithoutCurrent)
+	if len(remainingRoutingPositions) > 0 {
+		if targetAfterRemove < len(remainingRoutingPositions) {
+			targetSectionIndex = remainingRoutingPositions[targetAfterRemove]
+		} else {
+			targetSectionIndex = remainingRoutingPositions[len(remainingRoutingPositions)-1] + 1
+		}
+	}
+
+	_, err = runCommandCombined("uci", "-q", "reorder", fmt.Sprintf("homeproxy.%s=%d", ruleID, targetSectionIndex))
+	if err != nil {
+		return false, fmt.Errorf("set rule priority failed: %w", err)
+	}
+	return true, nil
 }
 
 func setUCIOption(ruleID string, key string, value string) error {
@@ -2004,6 +2122,7 @@ func (s *matchService) handleRulesList(w http.ResponseWriter, r *http.Request) {
 	outboundLabels := listOutboundLabels(sections)
 
 	rules := make([]routingRuleView, 0)
+	priority := 0
 	for _, section := range sections {
 		if section.Type != "routing_rule" {
 			continue
@@ -2028,11 +2147,12 @@ func (s *matchService) handleRulesList(w http.ResponseWriter, r *http.Request) {
 		}
 
 		rules = append(rules, routingRuleView{
-			ID:      section.Name,
-			Tag:     routingRuleTag(section.Name),
-			Name:    name,
-			Enabled: enabled,
-			RuleSet: ruleSetRefs,
+			ID:       section.Name,
+			Tag:      routingRuleTag(section.Name),
+			Name:     name,
+			Enabled:  enabled,
+			Priority: priority,
+			RuleSet:  ruleSetRefs,
 			HostIP: ruleHostIPConfig{
 				Domain:        sectionListValue(section, "domain"),
 				DomainSuffix:  sectionListValue(section, "domain_suffix"),
@@ -2049,6 +2169,7 @@ func (s *matchService) handleRulesList(w http.ResponseWriter, r *http.Request) {
 			},
 			Outbound: resolveRoutingOutbound(section.Options["action"], section.Options["outbound"], outboundLabels),
 		})
+		priority++
 	}
 
 	resp := rulesListResponse{
@@ -2109,6 +2230,13 @@ func (s *matchService) handleRulesUpdate(w http.ResponseWriter, r *http.Request)
 		}
 		changed = true
 	}
+	if req.Enabled != nil {
+		if err := setUCIOption(ruleID, "enabled", boolToUCIValue(*req.Enabled)); err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		changed = true
+	}
 
 	if req.Outbound != nil {
 		sections, err := parseUCISections(homeproxyUCIConfigPath)
@@ -2126,6 +2254,16 @@ func (s *matchService) handleRulesUpdate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		changed = true
+	}
+	if req.Priority != nil {
+		reordered, err := setRoutingRulePriority(ruleID, *req.Priority)
+		if err != nil {
+			http.Error(w, "update failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if reordered {
+			changed = true
+		}
 	}
 
 	cfg := req.Config.normalize()
@@ -2228,6 +2366,12 @@ func (s *matchService) handleRulesCreate(w http.ResponseWriter, r *http.Request)
 	cfg := req.Config.normalize()
 	if cfg.hasAny() {
 		if err := applyRuleListPatchInUCI(ruleID, cfg); err != nil {
+			http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Priority != nil {
+		if _, err := setRoutingRulePriority(ruleID, *req.Priority); err != nil {
 			http.Error(w, "create failed: "+err.Error(), http.StatusBadRequest)
 			return
 		}

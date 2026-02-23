@@ -98,6 +98,8 @@ Returns all HomeProxy `routing_rule` sections in **priority order** (top-to-bott
 - internal id: section name (`id`)
 - generated rule tag (`tag` => `cfg-<id>-rule`)
 - rule name (`label` fallback to section id)
+- rule enabled state (`enabled`)
+- rule priority index (`priority`, `0` is the top-most rule)
 - selected rule-sets (with id/tag/name)
 - Host/IP fields:
   - `domain`
@@ -122,7 +124,7 @@ curl http://127.0.0.1:7878/rules
 
 ### `POST /rules/update`
 
-Updates one routing rule in UCI (name, outbound, and/or list fields), but does **not** apply runtime changes.
+Updates one routing rule in UCI (name, enabled state, priority, outbound, and/or list fields), but does **not** apply runtime changes.
 
 Request:
 
@@ -130,6 +132,8 @@ Request:
 {
   "tag": "cfg-abc123-rule",
   "name": "My rule name",
+  "enabled": true,
+  "priority": 0,
   "outbound": {
     "class": "proxy",
     "node": "Proxy"
@@ -155,6 +159,8 @@ Notes:
 - `tag` may be either generated rule tag (`cfg-...-rule`) or raw section id.
 - snake_case aliases are also accepted (for example `rule_set`, `source_ip_cidr`, `port_range`).
 - `name` (or alias `label`) updates rule display name.
+- `enabled` toggles rule state in UCI (`true`/`false`).
+- `priority` changes rule order (`0` is top). Values larger than last index are clamped to the bottom.
 - `outbound.class` supports `direct`, `block`, `proxy`.
 - for `proxy`, set `outbound.node` to routing node section id (for example `Proxy`).
 - only list fields explicitly present in `config` are replaced.
@@ -168,6 +174,7 @@ Creates a new `routing_rule` section.
   "id": "api_rule_1",
   "name": "API rule",
   "enabled": true,
+  "priority": 0,
   "outbound": {
     "class": "direct"
   },
@@ -177,6 +184,11 @@ Creates a new `routing_rule` section.
   }
 }
 ```
+
+Notes:
+
+- If `enabled` is omitted, new rule is created as enabled.
+- `priority` is optional (`0` is top). Values larger than last index are clamped to the bottom.
 
 ### `POST /rules/delete`
 
