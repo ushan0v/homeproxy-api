@@ -94,6 +94,12 @@ func compileRuleSet(ctx context.Context, ruleSetCompatBytes []byte) ([]adapter.H
 }
 
 func matchAny(rules []adapter.HeadlessRule, meta *adapter.InboundContext) bool {
+	if meta == nil {
+		return false
+	}
+	// Rule matching in sing-box mutates per-request cache flags inside metadata.
+	// Clear them before each ruleset scan to avoid cross-ruleset false positives.
+	meta.ResetRuleCache()
 	for _, r := range rules {
 		if r.Match(meta) {
 			return true
